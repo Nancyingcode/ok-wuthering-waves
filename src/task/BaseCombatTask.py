@@ -12,6 +12,7 @@ from ok import safe_get
 from src import text_white_color
 from src.char import BaseChar
 from src.char.BaseChar import SwitchPriority, dot_color  # noqa
+from src.char.CamellyaSanhuaShoreKeeper import check_switch_timeout, planned_switch_target, reset_rotation
 from src.char.CharFactory import apply_team_char_classes, get_char_by_pos
 from src.combat.CombatCheck import CombatCheck
 from src.task.BaseWWTask import isolate_white_text_to_black, binarize_for_matching
@@ -344,6 +345,7 @@ class BaseCombatTask(CombatCheck):
         raise exception_type(message)
 
     def do_reset_to_false(self):
+        reset_rotation(self)
         self.scene.reset_abyss_start()
         self._abyss_force_combat_until = 0
         self._abyss_combat_active = False
@@ -696,6 +698,10 @@ class BaseCombatTask(CombatCheck):
         return self._switch_rule_3_target(candidates)
 
     def _choose_switch_target(self, current_char, has_intro, target_low_con=False):
+        planned_target = planned_switch_target(self, current_char)
+        if planned_target is not None:
+            # 椿散守的分段交接允许计划内回切奶位；普通换人仍保留奶位锁。
+            return self._log_switch_choice(current_char, planned_target, has_intro, 'camellya_team_handoff')
         candidates = [
             char for char in self.chars
             if char is not None and char != current_char
@@ -798,6 +804,7 @@ class BaseCombatTask(CombatCheck):
         last_click = 0
         start = time.time()
         while True:
+            check_switch_timeout(self)
             if not (isinstance(switch_to, ShoreKeeper) and has_intro):
                 self.check_combat()
             now = time.time()
@@ -936,6 +943,7 @@ class BaseCombatTask(CombatCheck):
 
     def combat_end(self):
         """战斗结束时调用的清理方法。"""
+        reset_rotation(self)
         current_char = self.get_current_char(raise_exception=False)
         if current_char:
             current_char.on_combat_end(self.chars)

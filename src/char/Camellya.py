@@ -2,6 +2,7 @@ import time
 from decimal import Decimal, ROUND_HALF_UP, ROUND_DOWN, ROUND_UP
 from ok import color_range_to_bound
 from src.char.BaseChar import BaseChar, SwitchPriority
+from src.char.CamellyaSanhuaShoreKeeper import CamellyaTeamVision, perform_team_rotation, supports_team
 import cv2
 import numpy as np
 
@@ -37,6 +38,8 @@ class Camellya(BaseChar):
         self.switch_other_char()
 
     def do_perform(self):
+        if perform_team_rotation(self):
+            return
         if self.has_intro:
             self.continues_normal_attack(1.2)
             self.sleep(0.1)
@@ -109,6 +112,8 @@ class Camellya(BaseChar):
             return True
 
     def ephemeral_ready(self):
+        if supports_team(self.task):
+            return CamellyaTeamVision.skill(self)['ready']
         box = self.task.box_of_screen_scaled(2560, 1440, 2110, 1236, 2217, 1343, name='camellya_resonance',
                                              hcenter=True)
         red_percent = self.calculate_color_percentage_in_masked(camellya_red_color, box, 0.395, 0.496)
@@ -157,6 +162,10 @@ class Camellya(BaseChar):
         self.sleep(1.1)
 
     def get_forte(self, budding=False):
+        if supports_team(self.task):
+            if budding:
+                return CamellyaTeamVision.budding_forte(self)['value']
+            return CamellyaTeamVision.forte(self)['value']
         box = self.task.box_of_screen_scaled(3840, 2160, 1630, 2002, 2176, 2004, name='camellya_forte', hcenter=True)
         forte_percent = 0
         if not budding:

@@ -1,10 +1,13 @@
 import time
 
 from src.char.BaseChar import BaseChar
+from src.char.CamellyaSanhuaShoreKeeper import perform_team_rotation
 
 
 class Sanhua(BaseChar):
     def do_perform(self):
+        if perform_team_rotation(self):
+            return
         liber_clicked = False
         sleep_time = 0.85
         self.sleep(0.02)
