@@ -1,0 +1,10 @@
+# Preserve the exact bytes of the manually tested import package.
+# Its CRLF endings are intentional; keep the normal whitespace checks enabled.
+* whitespace=blank-at-eol,blank-at-eof,space-before-tab,cr-at-eol
+Changli.py -text
+Jinhsi.py -text
+Verina.py -text
+team.json -text
+build.py text eol=lf
+README.md text eol=lf
+.gitattributes text eol=lf
