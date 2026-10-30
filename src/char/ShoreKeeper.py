@@ -1,6 +1,7 @@
 import time
 
 from src.char.BaseChar import BaseChar, SwitchPriority
+from src.char.CamellyaSanhuaShoreKeeper import perform_team_rotation
 
 
 class ShoreKeeper(BaseChar):
@@ -31,6 +32,8 @@ class ShoreKeeper(BaseChar):
             self.attribute = 1
 
     def do_perform(self):
+        if perform_team_rotation(self):
+            return
         if self.has_intro:
             self.task.skip_combat_check = True
             try:
