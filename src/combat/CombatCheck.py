@@ -342,7 +342,9 @@ class CombatCheck(BaseWWTask):
             self.draw_boxes('enemy_health_bar_red', boxes, color='blue')
             return True
         else:
+            # Boss 血条的渐变边缘会降低颜色占比；仅在顶部区域容忍缺口，并限制高度排除大色块。
             boxes = find_color_rectangles(self.frame, boss_health_color, min_width, min_height * 1.3,
+                                          max_height=max_height, threshold=0.9,
                                           box=self.box_of_screen(1269 / 3840, 58 / 2160, 2533 / 3840, 200 / 2160,
                                                                  hcenter=True, vcenter=True))
             if len(boxes) == 1:

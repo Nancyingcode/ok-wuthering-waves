@@ -133,6 +133,7 @@ class FarmEchoTask(WWOneTimeTask, BaseCombatTask):
     def do_run(self, max_recovery_retries=3):
         count = 0
         recovery_retries = 0
+        combat_start_retries = 0
         self.realm_entry_at_heal_point = False
         self._in_realm = self.in_realm()
         self.manage_boss_parameters()
@@ -186,7 +187,18 @@ class FarmEchoTask(WWOneTimeTask, BaseCombatTask):
                 self.log_info(self.tr('combat_wait_time: {combat_wait_time}').format(combat_wait_time=self.combat_wait_time))
                 self.check_boss_name()
 
-                self.combat_once(wait_combat_time=5, raise_if_not_found=False)
+                combat_entered = self.combat_once(wait_combat_time=5, raise_if_not_found=False)
+                if not combat_entered:
+                    # 未进战斗不代表已击败 Boss；保留刷取次数，重新准备战斗，避免空跑拾取。
+                    count = round_start_count
+                    combat_start_retries += 1
+                    if combat_start_retries >= max_recovery_retries:
+                        self.log_info(f'farm 4c: combat not detected after {combat_start_retries} attempts, stop farming',
+                                      notify=True)
+                        return
+                    self.log_info(f'farm 4c: combat not detected, retrying ({combat_start_retries}/{max_recovery_retries})')
+                    continue
+                combat_start_retries = 0
                 if self.is_revived:
                     continue
 
