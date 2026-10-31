@@ -192,7 +192,7 @@ class CombatCheck(BaseWWTask):
         except TaskDisabledException:
             raise
         except Exception as e:
-            logger.error(f'do_check_in_combat:', e)
+            logger.error('do_check_in_combat: %s', e, exc_info=True)
         finally:
             self.in_sleep_check = False
 

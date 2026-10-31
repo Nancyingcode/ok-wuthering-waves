@@ -23,7 +23,9 @@ class TestChunSanShouBloomRecovery(unittest.TestCase):
                                     in_team=Mock(return_value=(True, 0, 3)), in_liberation=False,
                                     has_target=Mock(return_value=True),
                                     find_one=Mock(return_value=True), combat_end_condition=None,
-                                    target_enemy=Mock(), target_enemy_time_out=3)
+                                    target_enemy=Mock(), target_enemy_time_out=3,
+                                    in_combat=Mock(return_value=True),
+                                    do_check_in_combat=Mock(return_value=True), in_sleep_check=False)
         self.rotation = Rotation(self.task)
         self.rotation.phase = Phase.CAMELLYA_BURST
         self.rotation.capture_bloom_diagnostics = Mock()
@@ -204,6 +206,70 @@ class TestChunSanShouBloomRecovery(unittest.TestCase):
         self.assertEqual(self.task.mouse_down.call_count, 2)
         self.assertIs(self.task.target_enemy, original_target)
         self.assertEqual(self.task.mouse_up.call_count, 2)
+
+    def test_bloom_combat_check_timeout_reaches_local_recovery(self):
+        # 全局 CombatCheck.in_combat 会吞掉段内 RotationTimeout；开花段必须让超时冒泡回局部恢复。
+        original_in_combat = self.task.in_combat
+        observed = []
+
+        def check_combat():
+            try:
+                self.task.in_combat()
+            except RotationTimeout as error:
+                observed.append(str(error))
+                raise
+
+        self.char.check_combat.side_effect = check_combat
+        self.task.do_check_in_combat.side_effect = RotationTimeout('target wait budget exhausted')
+        with self.assertRaisesRegex(RotationTimeout, 'target wait budget exhausted'):
+            self.rotation.bloom_output(self.char)
+        self.assertEqual(observed, ['target wait budget exhausted'])
+        self.assertIs(self.task.in_combat, original_in_combat)
+        self.assertFalse(self.task.in_sleep_check)
+        self.task.mouse_up.assert_called()
+
+    def test_target_wait_budget_is_capped_and_isolated_from_phase_budget(self):
+        # 丢锁空等不再按相位剩余时间申请预算：单次 2 秒、累计 3 秒封顶，用尽即交回局部恢复。
+        budgets = []
+
+        def native_target_enemy(wait=True, time_out=None, check_health=False):
+            budgets.append(time_out)
+            if time_out:
+                self.clock[0] += time_out
+            return False
+
+        self.task.target_enemy = native_target_enemy
+        self.task.target_enemy_time_out = 30
+        self.char.check_combat.side_effect = lambda: self.task.target_enemy(wait=True)
+        self.char.get_forte.return_value = 0.799
+        with self.assertRaisesRegex(RotationTimeout, 'target wait budget exhausted'):
+            self.rotation.bloom_output(self.char)
+        self.assertTrue(budgets)
+        for budget in budgets:
+            self.assertLessEqual(budget, self.rotation.BLOOM_TARGET_WAIT_MAX)
+        self.assertGreaterEqual(sum(budgets), self.rotation.BLOOM_TARGET_WAIT_TOTAL - 1e-6)
+        self.assertEqual(self.rotation.PHASE_TIMEOUT, 24)
+        self.assertLess(self.clock[0], 104)
+        self.assertIs(self.task.target_enemy, native_target_enemy)
+
+    def test_failed_target_wait_returns_to_local_recovery(self):
+        # 重锁失败在全局检测里等于脱战；开花段必须把它交回队内局部恢复。
+        native_target_enemy = Mock(return_value=False, side_effect=lambda **kwargs: self.advance(0.1))
+        self.task.target_enemy = native_target_enemy
+        self.task.target_enemy_time_out = 30
+        self.task.do_check_in_combat = Mock(return_value=False)
+
+        def check_combat():
+            self.task.target_enemy(wait=True)
+            self.task.in_combat()
+
+        self.char.check_combat.side_effect = check_combat
+        self.char.get_forte.return_value = 0.799
+        with self.assertRaisesRegex(RotationTimeout, 'target lost during output'):
+            self.rotation.bloom_output(self.char)
+        self.assertTrue(native_target_enemy.called)
+        self.assertIs(self.task.target_enemy, native_target_enemy)
+        self.task.mouse_up.assert_called()
 
 
 if __name__ == '__main__':

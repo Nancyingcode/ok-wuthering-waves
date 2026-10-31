@@ -199,6 +199,9 @@ class Rotation:
     LIBERATION_RECHECK_BUDGET = 0.5
     BLOOM_TARGET_RECOVERY_TIMEOUT = 0.75
     BLOOM_FEEDBACK_TIMEOUT = 1.2
+    # 输出段丢锁空等必须与相位预算隔离：单次与累计各自封顶，等待不再吃掉相位预算。
+    BLOOM_TARGET_WAIT_MAX = 2.0
+    BLOOM_TARGET_WAIT_TOTAL = 3.0
 
     def __init__(self, task):
         self.task = task
@@ -1603,6 +1606,7 @@ class Rotation:
         target_wait_wall = 0.0
         target_wait_active = 0.0
         wait_count = 0
+        target_wait_state = {'failed': False}
         observation = {'forte': None, 'since': 0.0, 'samples': 0, 'retries': 0}
         progress = []
         tail_grace = False
@@ -1612,6 +1616,8 @@ class Rotation:
         outcome = 'interrupted'
         original_target_enemy = self.task.target_enemy
         had_instance_override = 'target_enemy' in self.task.__dict__
+        original_in_combat = self.task.in_combat
+        had_in_combat_override = 'in_combat' in self.task.__dict__
         current_forte = -1.0
         current_marker = None
         current_elapsed = 0.0
@@ -1724,7 +1730,14 @@ class Rotation:
             check_budget()
             remaining = min(deadline, self.phase_started + self.PHASE_TIMEOUT) - time.monotonic()
             requested = self.task.target_enemy_time_out if time_out is None else time_out
-            allowed = max(0.0, min(requested, remaining))
+            total_remaining = self.BLOOM_TARGET_WAIT_TOTAL - target_wait_wall
+            # 丢锁空等与相位预算隔离：单次 2 秒、累计 3 秒封顶，等待不再吃掉相位预算。
+            allowed = max(0.0, min(requested, remaining, self.BLOOM_TARGET_WAIT_MAX, total_remaining))
+            if allowed <= 0:
+                char.logger.info(f'椿散守 bloom target wait skipped count={wait_count + 1} '
+                                 f'requested={requested:.3f} phase_remaining={remaining:.3f} '
+                                 f'total_remaining={total_remaining:.3f}')
+                raise RotationTimeout('bloom state did not end: target wait budget exhausted')
             wait_started = time.monotonic()
             active_before = char.time_elapsed_accounting_for_freeze(started)
             wait_count += 1
@@ -1751,12 +1764,29 @@ class Rotation:
                 log_target_context('wait_end', time.monotonic() - wall_started - target_wait_wall)
                 char.logger.info(f'椿散守 bloom target wait end count={wait_count} elapsed={duration:.3f} '
                                  f'total_wait={target_wait_wall:.3f} recovered={result}')
+            target_wait_state['failed'] = not result
             check_budget()
             return result
+
+        def bloom_in_combat(target=False):
+            # 全局 in_combat 的 except Exception 会把段内 RotationTimeout 改写成脱战；
+            # 开花段直接走 do_check_in_combat，让预算超时和丢锁证据冒泡回 bloom_output 的局部恢复。
+            previous_sleep_check = self.task.in_sleep_check
+            self.task.in_sleep_check = True
+            try:
+                result = self.task.do_check_in_combat(target)
+                if not result and target_wait_state['failed']:
+                    # 丢锁失败只一次性交回局部恢复，避免后续真实脱战被改写成超时。
+                    target_wait_state['failed'] = False
+                    raise RotationTimeout('bloom state did not end: target lost during output')
+                return result
+            finally:
+                self.task.in_sleep_check = previous_sleep_check
 
         # 通用锁敌可等待 30 秒；导入包仅在本队伍开花段计时并限制预算，退出时恢复实例原状。
         # 待通用锁敌提供预算及计时回调后，可移除此临时包装。
         self.task.target_enemy = timed_target_enemy
+        self.task.in_combat = bloom_in_combat
         char.last_forte = 0
         ended_frames = 0
         try:
@@ -1820,6 +1850,10 @@ class Rotation:
             self.capture_bloom_diagnostics(char, 'state_timeout', outcome)
             raise
         finally:
+            if had_in_combat_override:
+                self.task.in_combat = original_in_combat
+            else:
+                del self.task.in_combat
             if had_instance_override:
                 self.task.target_enemy = original_target_enemy
             else:
@@ -1835,7 +1869,7 @@ class Rotation:
                              f'resumed={resumed} resume_forte={resume_forte:.3f} '
                              f'output_budget={output_budget:.3f} ended_frames={ended_frames}')
 
-PACKAGE_ID = 'chunsanshou-v1.1.9-live-return'
+PACKAGE_ID = 'chunsanshou-v1.2.0-target-wait-budget'
 
 
 class TeamMember:
