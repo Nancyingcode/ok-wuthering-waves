@@ -190,6 +190,31 @@ class Rotation:
     BLOOM_WALL_TIMEOUT = 16
     BLOOM_ENTRY_RECHECK = 0.4
     BLOOM_ENDED_FORTE = 0.05
+    # 尾段判据：小幅抬升不再清窗，只有确认回满才重置；累计降幅与相对起点用于「打完了却量不出来」。
+    BLOOM_TAIL_RESET_FORTE = 0.25
+    BLOOM_TAIL_DROP_TOTAL = 0.03
+    BLOOM_TAIL_CONSUMED_RATIO = 0.65
+    # 1.2.6：贴零稳态。窗口尾部连续贴零（<= BLOOM_ENDED_FORTE）的读数跨度达到该值即视为已打完，
+    # 最近一次下降过旧不再阻断尾段出口；八个硬约束常量与既有门限一律不变。
+    BLOOM_TAIL_ZERO_SPAN = 0.75
+    # 1.2.7：中高位稳态（P3）。读数在容差内完全不动、整段零下降、样本新鲜、重击补按已用尽，
+    # 且仍在开花中（同角色 + 开花标记可见）时，输出预算耗尽后按完成收尾；1.2.6 贴零判据、
+    # 尾段门限与八个硬约束常量一律不动。
+    BLOOM_TAIL_STEADY_MIN = 0.20
+    # 上限刻意压在 0.75：0.799 这类满格平台按验收基线 D1/D3 仍必须走补按与超时，不进稳态出口。
+    BLOOM_TAIL_STEADY_MAX = 0.75
+    BLOOM_TAIL_STEADY_SPAN = 1.0
+    BLOOM_TAIL_STEADY_TOLERANCE = 0.005
+    BLOOM_TAIL_STEADY_RETRIES = 2
+    # 1.2.8：三格地板出口。实测两次收尾时回路稳定停在三格（forte≈0.082），它同时高于
+    # BLOOM_COMPLETE_FORTE=0.06 与 BLOOM_ENDED_FORTE=0.05，又 <=0.25 使尾段 reason 只会落在
+    # stale_decrease / insufficient_decreases，两条既有出口都不成立；这里新增一条与 1.2.7
+    # 中高位出口并列的独立地板出口，两个结束确认阈值与八个硬约束常量一律不动。
+    # 上限只覆盖三格（0.082）并留识别抖动余量：四格 ≈0.109 与中高位 0.20 以上仍按原判据。
+    BLOOM_TAIL_FLOOR_MAX = 0.10
+    BLOOM_TAIL_FLOOR_SPAN = 1.0
+    BLOOM_TAIL_FLOOR_RETRIES = 2
+    # 1.2.5：撤下 1.2.4 的满格滑动窗口快速通道，恢复 1.2.3 的平台期 0.4 秒 + 非满格 0.9 秒两条判据。
     BLOOM_COMPLETE_FORTE = 0.06
     CONCERTO_TOPUP_TIMEOUT = 2
     CONCERTO_CONFLICT_SETTLE = 0.25
@@ -1441,44 +1466,176 @@ class Rotation:
     def record_bloom_progress(samples, forte, elapsed):
         reset_reason = None
         if not 0 <= forte <= 1:
-            samples.clear()
+            # 单帧不可读只标记本帧缺失：保留已有下降证据，仅淘汰过期样本。
+            # 旧实现 samples.clear() 会在边界前一次颜色断档就抹掉整段消耗（实测 09:07:48 只剩 1 样本）。
+            samples[:] = [(at, value) for at, value in samples if elapsed - at <= 1.5]
             return 'forte_unknown'
         if samples:
             last_time, last_forte = samples[-1]
-            if elapsed - last_time > 0.5:
+            if elapsed - last_time > 1.5:
                 reset_reason = 'sample_gap'
-            elif forte - last_forte >= 0.015:
+            elif forte - last_forte >= Rotation.BLOOM_TAIL_RESET_FORTE:
                 reset_reason = 'forte_rise'
             if reset_reason:
                 samples.clear()
+            elif forte - last_forte >= 0.015:
+                # 小幅抬升多为颜色抖动或读数跳格：保留下降历史，只记录一次抬升供入口复核。
+                reset_reason = 'forte_rise'
         samples.append((elapsed, forte))
         samples[:] = [(at, value) for at, value in samples if elapsed - at <= 1.5]
         return reset_reason
 
     @staticmethod
-    def bloom_tail_status(samples, elapsed):
-        last_time, forte = samples[-1] if samples else (elapsed, -1)
-        decreases = [right[0] for left, right in zip(samples, samples[1:]) if left[1] - right[1] >= 0.015]
-        sample_age = elapsed - last_time if samples else -1
+    def bloom_tail_baseline(previous, forte):
+        # 1.2.5：相对消耗的基线取本段已观测峰值。1.2.4 用「首个可读帧」时，cast 结束那一两帧
+        # 回路环正在动或识别偏低，低值被钉死（实测反推 0.403），整段相对判据因此失效。
+        # 不可读帧不参与基线更新，保留已记录的峰值。
+        if not 0 <= forte <= 1:
+            return previous
+        return forte if previous is None else max(previous, forte)
+
+    @staticmethod
+    def bloom_tail_consumption(samples):
+        values = [(at, value) for at, value in samples if 0 <= value <= 1]
+        if not values:
+            return {'drop_total': 0.0, 'last_drop': 0.0, 'peak': -1.0, 'current': -1.0}
+        peak = max(value for _, value in values)
+        current = values[-1][1]
+        last_drop = values[-2][1] - current if len(values) > 1 else 0.0
+        return {'drop_total': peak - current, 'last_drop': last_drop,
+                'peak': peak, 'current': current}
+
+    @classmethod
+    def bloom_tail_status(cls, samples, elapsed, baseline=None):
+        values = [(at, value) for at, value in samples if 0 <= value <= 1]
+        last_time, forte = values[-1] if values else (elapsed, -1)
+        consumption = cls.bloom_tail_consumption(values)
+        decreases = [values[index][0] for index in range(1, len(values))
+                     if values[index - 1][1] - values[index][1] >= 0.015]
+        sample_age = elapsed - last_time if values else -1
         drop_age = elapsed - decreases[-1] if decreases else -1
-        span = last_time - samples[0][0] if samples else 0
-        if len(samples) < 3:
+        span = last_time - values[0][0] if values else 0
+        # 1.2.6：贴零稳态跨度。窗口尾部连续贴零样本的跨度；实测 18:25:38 forte=0.000 与
+        # 18:28:46 forte=0.032 都已耗尽，却因最近一次下降超过 0.75 秒判 stale_decrease，
+        # 而 bloom_ended 又要求开花标记消失才成立，两侧都不给出口。
+        zero_hold = -1.0
+        for index in range(len(values) - 1, -1, -1):
+            if values[index][1] > cls.BLOOM_ENDED_FORTE:
+                break
+            zero_hold = last_time - values[index][0]
+        # 尾段门限：绝对残量 <=0.25，或以本段观测峰值（bloom_tail_baseline）为基准已消耗 >=65%；峰值不可读时不开放相对判据。
+        consumed_ratio = -1.0
+        if baseline is not None and 0.05 < baseline <= 1 and 0 <= forte <= 1:
+            consumed_ratio = (baseline - forte) / baseline
+        inside_tail = 0 <= forte <= 0.25 or consumed_ratio >= cls.BLOOM_TAIL_CONSUMED_RATIO
+        zero_steady = len(values) >= 3 and zero_hold >= cls.BLOOM_TAIL_ZERO_SPAN
+        steady = cls.bloom_steady_status(values)
+        if len(values) < 3:
             reason = 'insufficient_samples'
-        elif not 0 <= forte <= 0.25:
+        elif not inside_tail:
             reason = 'outside_tail'
         elif sample_age > 0.5:
             reason = 'stale_sample'
-        elif len(decreases) < 2:
-            reason = 'insufficient_decreases'
+        elif zero_steady:
+            reason = 'progressing'
         elif drop_age > 0.75:
             reason = 'stale_decrease'
+        elif consumption['drop_total'] < cls.BLOOM_TAIL_DROP_TOTAL:
+            reason = 'insufficient_decreases'
         elif span < 0.25:
             reason = 'short_observation'
         else:
             reason = 'progressing'
-        return {'reason': reason, 'samples': len(samples), 'forte': round(forte, 3),
+        return {'reason': reason, 'samples': len(values), 'forte': round(forte, 3),
                 'sample_age': round(sample_age, 3), 'decreases': len(decreases),
-                'drop_age': round(drop_age, 3), 'span': round(span, 3)}
+                'drop_age': round(drop_age, 3), 'span': round(span, 3),
+                'zero_hold': round(zero_hold, 3),
+                'steady_hold': steady['steady_hold'],
+                'steady_range': steady['steady_range'],
+                'steady_flat': steady['steady_flat'],
+                'drop_total': round(consumption['drop_total'], 3),
+                'consumed_ratio': round(consumed_ratio, 3)}
+
+    @classmethod
+    def bloom_steady_status(cls, samples):
+        """1.2.7：中高位稳态跨度。从窗口尾部向前扫最近一段「读数在容差内完全一致」的样本。"""
+        values = [(at, value) for at, value in samples if 0 <= value <= 1]
+        steady = {'steady_hold': -1.0, 'steady_range': -1.0, 'steady_flat': False}
+        if len(values) < 3:
+            return steady
+        last_time, forte = values[-1]
+        index = len(values) - 1
+        while index > 0 and abs(values[index - 1][1] - forte) <= cls.BLOOM_TAIL_STEADY_TOLERANCE:
+            index -= 1
+        window = [value for _, value in values[index:]]
+        steady['steady_hold'] = round(last_time - values[index][0], 3)
+        steady['steady_range'] = round(max(window) - min(window), 3)
+        steady['steady_flat'] = (len(window) >= 3
+                                 and steady['steady_range'] <= cls.BLOOM_TAIL_STEADY_TOLERANCE
+                                 and steady['steady_hold'] >= cls.BLOOM_TAIL_STEADY_SPAN)
+        return steady
+
+    @classmethod
+    def bloom_steady_completion_allowed(cls, samples, output_wall, output_budget, forte, retries,
+                                        same_character, marker_visible, in_liberation):
+        """1.2.7：中高位稳态完成判定。只在输出预算耗尽之后可用，且必须仍在开花中。
+
+        与「在打但读数不动」的区分证据：样本新鲜（采集链活着）、读数在 0.5% 容差内完全不动
+        且整段零下降（实测消耗 12-16%/s，1 秒内必跨一格）、两次重击补按已用尽（队内已无纠正
+        手段）、同角色在场且开花标记仍可见。
+        """
+        if output_wall < output_budget:
+            return False
+        if not same_character or not marker_visible or in_liberation:
+            return False
+        if retries < cls.BLOOM_TAIL_STEADY_RETRIES:
+            return False
+        if not cls.BLOOM_TAIL_STEADY_MIN <= forte <= cls.BLOOM_TAIL_STEADY_MAX:
+            return False
+        status = cls.bloom_tail_status(samples, output_wall)
+        if status['reason'] != 'outside_tail':
+            return False
+        if status['sample_age'] < 0 or status['sample_age'] > 0.5:
+            return False
+        if status['decreases'] != 0:
+            return False
+        if status['drop_total'] > cls.BLOOM_TAIL_STEADY_TOLERANCE:
+            return False
+        return status['steady_flat']
+
+    @classmethod
+    def bloom_floor_completion_allowed(cls, samples, output_wall, output_budget, forte, retries,
+                                       same_character, marker_visible, in_liberation, baseline=None):
+        """1.2.8：三格地板完成判定。与 1.2.7 的中高位出口并列，只接贴地三格这一种形态。
+
+        实测 21:43:54 与 21:44:31 两次同形：forte=0.082（约 8.15%，三格）、steady_range=0.0、
+        steady_hold >= 1.0、consumed_ratio=0.918、heavy_retries=2、开花标记仍在屏。该读数高于
+        BLOOM_COMPLETE_FORTE 与 BLOOM_ENDED_FORTE，所以 bloom_ended 与 1.2.6 的贴零判据都不成立；
+        它又 <=0.25 使尾段 reason 只落在 stale_decrease / insufficient_decreases，1.2.7 的
+        outside_tail 门同样接不住。
+        区分「还没打完」的三道门：读数必须落在三格窗内、本段相对观测峰值已消耗 >=65%、
+        尾段必须已经没有任何 progressing 证据；两次重击补按已用尽且仍在开花中才放行。
+        """
+        if output_wall < output_budget:
+            return False
+        if not same_character or not marker_visible or in_liberation:
+            return False
+        if retries < cls.BLOOM_TAIL_FLOOR_RETRIES:
+            return False
+        if not cls.BLOOM_COMPLETE_FORTE < forte <= cls.BLOOM_TAIL_FLOOR_MAX:
+            return False
+        status = cls.bloom_tail_status(samples, output_wall, baseline)
+        if status['sample_age'] < 0 or status['sample_age'] > 0.5:
+            return False
+        if status['reason'] not in ('stale_decrease', 'insufficient_decreases'):
+            return False
+        if status['consumed_ratio'] < cls.BLOOM_TAIL_CONSUMED_RATIO:
+            return False
+        if status['steady_range'] < 0 or status['steady_range'] > cls.BLOOM_TAIL_STEADY_TOLERANCE:
+            return False
+        if status['steady_hold'] < cls.BLOOM_TAIL_FLOOR_SPAN:
+            return False
+        return status['steady_flat']
 
     @staticmethod
     def bloom_tail_progressing(samples, elapsed):
@@ -1537,13 +1694,34 @@ class Rotation:
                 return
         else:
             previous = observation['forte']
+            plateau = observation.get('plateau')
+            if forte >= 0.9:
+                # 满格平台期单独计时：识别抖动（上下 1-2 格）会让逐帧差值反复越过 0.015，
+                # 旧判据因此不断重置停滞起点（1.2.1 实测拖到 1.271 秒才首次补按）。
+                # 平台期只认「已真实消耗掉峰值的 3% 以上」为状态变化；向上抖动只抬高峰值，不重置起点。
+                # 1.2.3：向上抖动只抬高峰值、不重置起点。1.2.2 把「相对峰值再抬升 >=0.015」
+                # 也算状态变化，0.922 那档每次上抖都重置 since，首次补按被拖到 1.112/1.231/2.172 秒。
+                if plateau is None or plateau['peak'] - forte >= 0.03:
+                    plateau = {'peak': forte, 'since': elapsed, 'samples': 1}
+                else:
+                    plateau['samples'] += 1
+                    plateau['peak'] = max(plateau['peak'], forte)
+            else:
+                plateau = None
+            observation['plateau'] = plateau
+            # 1.2.5：撤下 1.2.4 的滑动窗口快速通道——窗口判的是降幅速率而非等级，帧稀疏或读数上跳时
+            # 峰值挂在高位反而更晚触发（1.2.4 实测 count=1 的 output 六次里只有一次进 0.4 档）。
+            # 恢复 1.2.3 的平台期 0.4 秒与非满格 0.9 秒两条判据。
             changed = previous is None or abs(previous - forte) >= 0.015
             if changed:
                 observation.update(forte=forte, since=elapsed, samples=1)
-                return
-            observation['samples'] += 1
+            else:
+                observation['samples'] += 1
             stalled = observation['samples'] >= 3 and elapsed - observation['since'] >= 0.9
-            if stalled:
+            # 起步阶段回路常停在满格（实测 0.947 / 0.996 达 0.9-3.1 秒）：满格不动本身就是补按证据，不再等满 0.9 秒。
+            near_full_stalled = (plateau is not None and plateau['samples'] >= 3
+                                 and elapsed - plateau['since'] >= 0.4)
+            if stalled or near_full_stalled:
                 reason = 'forte_stalled'
         if reason is not None and observation['retries'] < 2:
             check_budget = check_budget or self.check_timeout
@@ -1584,6 +1762,8 @@ class Rotation:
             observation['forte'] = None
             observation['samples'] = 0
             observation['unknown_since'] = None
+            # 补按后清空平台期记录：第二次补按仍需再攒 0.4 秒，避免连发。
+            observation['plateau'] = None
 
     @staticmethod
     def bloom_resume_budget(forte):
@@ -1609,7 +1789,10 @@ class Rotation:
         target_wait_state = {'failed': False}
         observation = {'forte': None, 'since': 0.0, 'samples': 0, 'retries': 0}
         progress = []
+        tail_baseline = None
         tail_grace = False
+        steady_completion = False
+        floor_completion = False
         recheck_started = None
         progress_reset = None
         progress_reset_detail = None
@@ -1647,7 +1830,7 @@ class Rotation:
             output_wall = wall - target_wait_wall
             if output_wall < output_budget:
                 return
-            status = self.bloom_tail_status(progress, output_wall)
+            status = self.bloom_tail_status(progress, output_wall, tail_baseline)
             progressing = status['reason'] == 'progressing'
             check_recheck_deadline()
             if not progressing:
@@ -1725,6 +1908,7 @@ class Rotation:
         def timed_target_enemy(wait=True, time_out=None, check_health=False):
             nonlocal target_wait_wall, target_wait_active, wait_count, progress_reset, recheck_started
             nonlocal progress_reset_detail, current_forte, current_marker, resource_observed, ended_frames
+            nonlocal tail_baseline
             if not wait:
                 return original_target_enemy(wait=wait, time_out=time_out, check_health=check_health)
             check_budget()
@@ -1754,6 +1938,7 @@ class Rotation:
                 observation['forte'] = None
                 observation['samples'] = 0
                 progress.clear()
+                tail_baseline = None
                 progress_reset = 'retarget'
                 progress_reset_detail = None
                 recheck_started = None
@@ -1800,6 +1985,16 @@ class Rotation:
                 current_forte = float(char.get_forte(budding=True))
                 sampled_output_wall = time.monotonic() - wall_started - target_wait_wall
                 resource_observed = resource_observed or current_forte > self.BLOOM_ENDED_FORTE
+                # 1.2.5：基线随样本更新为本段观测峰值，consumed = 1 - forte / peak；
+                # cast 后首帧偏低不再把相对判据钉死在低基线（1.2.4 实测反推基线仅 0.403）。
+                tail_baseline = self.bloom_tail_baseline(tail_baseline, current_forte)
+                # 本帧消耗先入账，软预算判定才能看到边界那一帧的下降（诊断分析.txt 第 51 行）。
+                previous_sample = progress[-1] if progress else None
+                reset_reason = self.record_bloom_progress(progress, current_forte, sampled_output_wall)
+                if reset_reason:
+                    progress_reset = reset_reason
+                    progress_reset_detail = {'reason': reset_reason, 'at': sampled_output_wall,
+                                             'previous': previous_sample, 'current': current_forte}
                 in_team, current_index, _ = self.task.in_team()
                 same_character = in_team and current_index == char.index
                 # 结束候选帧两格读数约 5.68%，三格约 8.15%；仅结束确认容忍两格，进入和停滞阈值不变。
@@ -1814,6 +2009,34 @@ class Rotation:
                     outcome = 'completed'
                     char.logger.info(f'椿散守 bloom completion confirmed elapsed={elapsed:.3f} '
                                      f'forte={current_forte:.3f} ended_frames={ended_frames} resumed={resumed}')
+                    break
+                # 1.2.7：输出预算耗尽后先看中高位稳态完成判定，避免「已经打完、只是读数冻结」被
+                # 软预算改写成 output timeout；判据只在预算边界之后可用，不提前截断真实输出。
+                if self.bloom_steady_completion_allowed(progress, sampled_output_wall, output_budget,
+                                                        current_forte, observation['retries'], same_character,
+                                                        bool(current_marker), self.task.in_liberation):
+                    outcome = 'completed'
+                    steady_completion = True
+                    char.logger.info(f'椿散守 bloom steady completion elapsed={elapsed:.3f} '
+                                     f'output_wall={sampled_output_wall:.3f} budget={output_budget:.3f} '
+                                     f'forte={current_forte:.3f} heavy_retries={observation["retries"]} '
+                                     f'status={self.bloom_tail_status(progress, sampled_output_wall, tail_baseline)}')
+                    self.capture_bloom_diagnostics(char, 'steady_completion', 'mid_band_frozen')
+                    break
+                # 1.2.8：三格地板出口。0.082 既进不了 bloom_ended（> BLOOM_COMPLETE_FORTE），
+                # 也不会被判 outside_tail，只会在宽限里耗尽预算；与 1.2.7 中高位出口并列判定。
+                if self.bloom_floor_completion_allowed(progress, sampled_output_wall, output_budget,
+                                                       current_forte, observation['retries'], same_character,
+                                                       bool(current_marker), self.task.in_liberation,
+                                                       tail_baseline):
+                    outcome = 'completed'
+                    floor_completion = True
+                    floor_status = self.bloom_tail_status(progress, sampled_output_wall, tail_baseline)
+                    char.logger.info(f'椿散守 bloom floor completion elapsed={elapsed:.3f} '
+                                     f'output_wall={sampled_output_wall:.3f} budget={output_budget:.3f} '
+                                     f'forte={current_forte:.3f} heavy_retries={observation["retries"]} '
+                                     f'status={floor_status}')
+                    self.capture_bloom_diagnostics(char, 'floor_completion', 'three_grid_floor')
                     break
                 # 软复核到期后只接受已经取得的结束证据，不再等待或发送输入；硬预算仍在最前。
                 check_recheck_deadline()
@@ -1831,13 +2054,6 @@ class Rotation:
                 if sampled_wait_count != wait_count or frame_changed:
                     continue
                 check_budget()
-                output_wall = sampled_output_wall
-                previous_sample = progress[-1] if progress else None
-                reset_reason = self.record_bloom_progress(progress, current_forte, output_wall)
-                if reset_reason:
-                    progress_reset = reset_reason
-                    progress_reset_detail = {'reason': reset_reason, 'at': output_wall,
-                                             'previous': previous_sample, 'current': current_forte}
                 self.maintain_bloom_heavy(char, observation, elapsed, forte=current_forte,
                                           bloom_visible=same_character and bool(current_marker)
                                                         and not self.task.in_liberation,
@@ -1846,7 +2062,7 @@ class Rotation:
         except RotationTimeout as error:
             outcome = str(error)
             output_wall = time.monotonic() - wall_started - target_wait_wall
-            log_tail('exit', output_wall, self.bloom_tail_status(progress, output_wall))
+            log_tail('exit', output_wall, self.bloom_tail_status(progress, output_wall, tail_baseline))
             self.capture_bloom_diagnostics(char, 'state_timeout', outcome)
             raise
         finally:
@@ -1865,11 +2081,12 @@ class Rotation:
                              f'output={elapsed:.3f} output_wall={max(0.0, wall - target_wait_wall):.3f} '
                              f'target_wait={target_wait_wall:.3f} wait_count={wait_count} '
                              f'heavy_retries={observation["retries"]} tail_grace={tail_grace} '
+                             f'steady={steady_completion} floor={floor_completion} '
                              f'tail_extra={max(0.0, wall - target_wait_wall - output_budget):.3f} '
                              f'resumed={resumed} resume_forte={resume_forte:.3f} '
                              f'output_budget={output_budget:.3f} ended_frames={ended_frames}')
 
-PACKAGE_ID = 'chunsanshou-v1.2.0-target-wait-budget'
+PACKAGE_ID = 'chunsanshou-v1.2.8-bloom-floor-exit'
 
 
 class TeamMember:

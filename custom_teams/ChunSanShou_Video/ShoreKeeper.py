@@ -1,7 +1,7 @@
 from src.char.ShoreKeeper import ShoreKeeper as BuiltinShoreKeeper
 from src.char.BaseChar import SwitchPriority
 
-PACKAGE_ID = 'chunsanshou-v1.2.0-target-wait-budget'
+PACKAGE_ID = 'chunsanshou-v1.2.8-bloom-floor-exit'
 
 
 class TeamMember:
