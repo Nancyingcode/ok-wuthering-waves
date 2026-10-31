@@ -77,3 +77,6 @@ repo/
 
 assets/result.json
 src/gui/CharacterCodeTab.py
+
+# Session scratch files (diagnostics, one-off scripts, local logs)
+.dsh-tmp/
