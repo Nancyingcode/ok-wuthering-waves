@@ -1,0 +1,532 @@
+diff --git a/src-tauri/src/app.rs b/src-tauri/src/app.rs
+index fc2d5bc..8f3d584 100644
+--- a/src-tauri/src/app.rs
++++ b/src-tauri/src/app.rs
+@@ -246,11 +246,19 @@ pub fn update_app_from_yml(app: &mut App, file_path_str: &str) {
+ 
+     apply_profile_inheritance(&mut parsed_app);
+ 
++    // Official releases do not contain the Personal source. Keep launcher profiles
++    // authoritative until upstream preserves them when refreshing app metadata.
++    parsed_app.profiles = read_embedded_app().profiles;
++
+     app.icon = parsed_app.icon;
+     app.website = parsed_app.website;
+     app.profiles = parsed_app.profiles;
+ 
+-    if app.get_profile(&app.current_profile).is_none() {
++    if !app
++        .profiles
++        .iter()
++        .any(|profile| profile.name == app.current_profile)
++    {
+         if let Some(first_profile) = app.profiles.first() {
+             app.current_profile = first_profile.name.clone();
+         }
+@@ -432,6 +440,29 @@ mod tests {
+         UPDATE_METHOD_OPTION_MANUAL,
+     };
+ 
++    #[test]
++    fn launcher_profiles_survive_official_metadata_refresh() {
++        let mut app = super::read_embedded_app();
++        let profiles = app.profiles.clone();
++        app.current_profile = profiles.last().unwrap().name.clone();
++        let selected_profile = app.current_profile.clone();
++        let path = std::env::temp_dir().join(format!(
++            "pyappify-official-config-{}.yml",
++            std::process::id()
++        ));
++        std::fs::write(
++            &path,
++            "name: ok-ww\nprofiles:\n  - name: China\n    git_url: https://example.com/official.git\n",
++        )
++        .unwrap();
++
++        super::update_app_from_yml(&mut app, path.to_str().unwrap());
++        std::fs::remove_file(path).unwrap();
++
++        assert_eq!(app.profiles, profiles);
++        assert_eq!(app.current_profile, selected_profile);
++    }
++
+     #[tokio::test]
+     async fn atomically_replaces_existing_app_json() {
+         let unique = std::time::SystemTime::now()
+diff --git a/src-tauri/src/app_service.rs b/src-tauri/src/app_service.rs
+index f8c43b2..108ab9e 100644
+--- a/src-tauri/src/app_service.rs
++++ b/src-tauri/src/app_service.rs
+@@ -181,6 +181,13 @@ async fn ensure_app_is_ready_to_start(app_name: &str) -> Result<()> {
+         .filter(|app| app.name == app_name)
+         .with_context(|| format!("App '{}' not found.", app_name))?;
+ 
++    if !app.installed {
++        bail!(
++            "App '{}' is not installed. Complete profile setup before starting.",
++            app_name
++        );
++    }
++
+     match app.update_state {
+         AppUpdateState::Idle => Ok(()),
+         AppUpdateState::Updating => bail!(
+@@ -872,23 +879,7 @@ pub async fn update_working_from_repo(app_name: &str) -> Result<()> {
+                 task_repo_path.display()
+             )
+         })?;
+-        file::copy_dir_recursive_filtered_sync(
+-            &task_repo_path,
+-            &task_working_dir_path,
+-            &[".git"],
+-            &|relative_path| match repository.status_should_ignore(relative_path) {
+-                Ok(ignored) => ignored,
+-                Err(error) => {
+-                    warn!(
+-                        "Could not determine Git ignore status for {} in {}: {}. Copying it.",
+-                        relative_path.display(),
+-                        task_repo_path.display(),
+-                        error
+-                    );
+-                    false
+-                }
+-            },
+-        )?;
++        file::copy_repository_files_sync(&repository, &task_working_dir_path)?;
+         file::sync_delete_extra_files(&task_working_dir_path, &task_repo_path)?;
+         Ok(())
+     })
+@@ -901,27 +892,12 @@ fn get_profile_for_setup<'a>(
+     profile_name: &str,
+     app_name: &str,
+ ) -> Result<(&'a Profile, String)> {
+-    match temp_app_config.get_profile(profile_name) {
+-        Some(profile) => Ok((profile, profile_name.to_string())),
+-        None => {
+-            if profile_name != "default" {
+-                warn!(
+-                    "Profile '{}' not found for setup in app '{}'. Falling back to 'default' profile.",
+-                    profile_name, app_name
+-                );
+-            }
+-            let final_profile_name_to_set = "default".to_string();
+-            let profile = temp_app_config.get_profile("default").ok_or_else(|| {
+-                anyhow!(
+-                    "Profile '{}' (and fallback 'default') not found in {} for app {}",
+-                    profile_name,
+-                    YML_FILE_NAME,
+-                    app_name
+-                )
+-            })?;
+-            Ok((profile, final_profile_name_to_set))
+-        }
+-    }
++    let profile = temp_app_config
++        .profiles
++        .iter()
++        .find(|profile| profile.name == profile_name)
++        .ok_or_else(|| anyhow!("Unknown profile '{}' for app '{}'.", profile_name, app_name))?;
++    Ok((profile, profile_name.to_string()))
+ }
+ 
+ #[tauri::command]
+@@ -929,18 +905,39 @@ pub async fn setup_app(app_name: &str, profile_name: &str) -> Result<(), Error>
+     let app_dir_lock = get_app_lock(app_name).await?;
+     let _guard = app_dir_lock.lock().await;
+ 
++    ensure_app_stopped_for_update(app_name).await?;
++
+     let repo_path = path::get_app_repo_path(app_name);
+-    let app = get_app_by_name(app_name).await?;
++    let mut app = get_app_by_name(app_name).await?;
++    get_profile_for_setup(&app, profile_name, app_name)?;
++    app.current_profile = profile_name.to_string();
+ 
+     ensure_repository(&app).await?;
+ 
++    let (versions, _) = git::get_tags_and_current_version(app_name, repo_path.clone()).await?;
++    let version = versions
++        .iter()
++        .find(|version| git::is_release_version(version))
++        .or_else(|| versions.first())
++        .ok_or_else(|| {
++            anyhow!(
++                "No version tags found for profile '{}'. Publish a version tag first.",
++                profile_name
++            )
++        })?;
++    git::checkout_version_tag(app_name, &repo_path, version).await?;
++
++    // A failed source/dependency switch must not leave the old Start button usable.
++    app.installed = false;
++    save_app_config_to_json(&app).await?;
++    *APP.lock().await = Some(app);
++    emit_app().await;
++
+     let working_dir_path = get_app_working_dir_path(app_name);
+     if !repo_path.exists() {
+         err!("Repo for {} not at {}", app_name, repo_path.display());
+     }
+ 
+-    delete_dir_if_exist(&working_dir_path).await?;
+-
+     tokio::fs::create_dir_all(&working_dir_path)
+         .await
+         .with_context(|| format!("Failed to create dir {}", working_dir_path.display()))?;
+@@ -1207,14 +1204,15 @@ async fn ensure_app_stopped_for_update(app_name: &str) -> Result<(), Error> {
+ async fn update_to_version_inner(app_name: &str, version: &str) -> Result<(), Error> {
+     let working_dir_path = get_app_working_dir_path(app_name);
+ 
+-    let (previous_version, old_requirements_spec) = {
++    let (previous_version, old_requirements_spec, profile_name) = {
+         let app_guard = APP.lock().await;
+         match app_guard.as_ref().filter(|app| app.name == app_name) {
+             Some(app) => (
+                 app.current_version.clone(),
+                 app.get_current_profile_settings().requirements.clone(),
++                app.current_profile.clone(),
+             ),
+-            None => (None, String::new()),
++            None => (None, String::new(), String::new()),
+         }
+     };
+ 
+@@ -1303,10 +1301,8 @@ async fn update_to_version_inner(app_name: &str, version: &str) -> Result<(), Er
+         let mut temp_app = read_embedded_app();
+         temp_app.name = app_name.to_string();
+         update_app_from_yml(&mut temp_app, &yml_path.to_string_lossy());
+-        match temp_app.get_profile("default") {
+-            Some(p) => (p.requirements.clone(), p.pip_args.clone()),
+-            None => (String::new(), String::new()),
+-        }
++        let (profile, _) = get_profile_for_setup(&temp_app, &profile_name, app_name)?;
++        (profile.requirements.clone(), profile.pip_args.clone())
+     };
+     let new_content = get_relevant_content(&new_requirements_spec, &working_dir_path);
+ 
+@@ -1623,6 +1619,12 @@ pub async fn start_app(app_handle: AppHandle, app_name: String) -> Result<(), Er
+     let _guard = app_dir_lock.lock().await;
+     ensure_app_is_ready_to_start(&app_name).await?;
+ 
++    let mut system = System::new();
++    system.refresh_processes(ProcessesToUpdate::All, true);
++    if is_app_running(&system, &app_name) {
++        return Err(err!("App '{}' is already running.", app_name));
++    }
++
+     if !check_python_env_exists(&app_name) {
+         warn!(
+             "Python .venv not found for '{}'. Deleting app artifacts.",
+@@ -2069,6 +2071,19 @@ mod tests {
+         values.iter().map(|value| value.to_string()).collect()
+     }
+ 
++    #[test]
++    fn launcher_profiles_select_the_requested_repository() {
++        let app: crate::app::App = serde_yaml::from_str(
++            "name: ok-ww\nprofiles:\n  - name: Official\n    git_url: https://example.com/official.git\n  - name: Personal\n    git_url: git@example.com:personal.git\n    pip_args: --no-deps --index-url https://pypi.org/simple/\n"
++        )
++        .unwrap();
++        let (profile, name) = super::get_profile_for_setup(&app, "Personal", &app.name).unwrap();
++        assert_eq!(name, "Personal");
++        assert_eq!(profile.git_url, "git@example.com:personal.git");
++        assert_eq!(profile.pip_args, "--no-deps --index-url https://pypi.org/simple/");
++        assert!(super::get_profile_for_setup(&app, "Missing", &app.name).is_err());
++    }
++
+     fn shortcut_profile(use_pythonw: bool) -> Profile {
+         Profile {
+             name: "default".to_string(),
+diff --git a/src-tauri/src/git.rs b/src-tauri/src/git.rs
+index 8f4e3e3..1d2e10b 100644
+--- a/src-tauri/src/git.rs
++++ b/src-tauri/src/git.rs
+@@ -433,15 +433,47 @@ fn prune_deleted_local_tags_from_remote(
+     Ok(())
+ }
+ 
+-pub fn open_repository(repo_path: &Path) -> Result<Repository> {
++fn initialize_git_config() {
+     GIT_CONFIG_INITIALIZED.get_or_init(|| {
+         unsafe {
+             let _ = opts::set_verify_owner_validation(false);
+         }
+         debug!("git2 owner validation disabled for this process.");
+     });
+-    Repository::open(repo_path)
+-        .with_context(|| format!("Failed to open local repo at {}", repo_path.display()))
++}
++
++fn configure_repository(repo: &Repository) -> Result<(), GitError> {
++    #[cfg(windows)]
++    repo.config()?.set_bool("core.longpaths", true)?;
++    Ok(())
++}
++
++pub fn open_repository(repo_path: &Path) -> Result<Repository> {
++    initialize_git_config();
++    let repo = Repository::open(repo_path)
++        .with_context(|| format!("Failed to open local repo at {}", repo_path.display()))?;
++    configure_repository(&repo)?;
++    Ok(repo)
++}
++
++fn clone_repository(
++    url: &str,
++    repo_path: &Path,
++    fetch_options: FetchOptions<'_>,
++) -> Result<Repository> {
++    initialize_git_config();
++    let mut builder = git2::build::RepoBuilder::new();
++    builder.fetch_options(fetch_options);
++    builder.bare(false);
++    builder.remote_create(|repo, name, url| {
++        // Template filenames exceed MAX_PATH under an installed launcher's data
++        // directory. Set this before clone's checkout, not only when reopening it.
++        configure_repository(repo)?;
++        repo.remote(name, url)
++    });
++    builder
++        .clone(url, repo_path)
++        .with_context(|| format!("Git clone failed for {}", url))
+ }
+ 
+ pub fn get_repository_origin_url(repo: &Repository) -> Result<Option<String>> {
+@@ -696,19 +728,17 @@ pub async fn ensure_repository(app: &App) -> Result<()> {
+         let mut fetch_options = create_fetch_options(callbacks, None);
+         fetch_options.download_tags(git2::AutotagOption::All);
+ 
+-        let mut builder = git2::build::RepoBuilder::new();
+-        builder.fetch_options(fetch_options);
+-        builder.bare(false);
+-
+         emit_info!(
+             app_name_for_messages,
+             "Attempting to clone {} into {}",
+             url_for_clone_task,
+             repo_path_for_clone_task.display()
+         );
+-        let repo = builder
+-            .clone(&url_for_clone_task, &repo_path_for_clone_task)
+-            .with_context(|| format!("Git clone failed for {}", url_for_clone_task))?;
++        let repo = clone_repository(
++            &url_for_clone_task,
++            &repo_path_for_clone_task,
++            fetch_options,
++        )?;
+ 
+         emit_info!(
+             app_name_for_messages,
+@@ -1135,6 +1165,44 @@ mod tests {
+     use git2::{Repository, Signature};
+     use std::cmp::Ordering;
+ 
++    #[cfg(windows)]
++    #[test]
++    fn launcher_profiles_clone_checks_out_long_template_paths() {
++        let unique = std::time::SystemTime::now()
++            .duration_since(std::time::UNIX_EPOCH)
++            .unwrap()
++            .as_nanos();
++        let root = std::env::temp_dir().join(format!(
++            "pyappify-clone-paths-{}-{unique}", std::process::id()
++        ));
++        let source = root.join("source");
++        let destination = root.join("installed-launcher/version-switcher/data/apps/ok-ww/repo");
++        let template = std::path::PathBuf::from("ok_templates")
++            .join(format!("{}.jpg", "a".repeat(140)));
++        std::fs::create_dir_all(source.join("ok_templates")).unwrap();
++        std::fs::write(source.join(&template), b"template fixture").unwrap();
++        assert!(destination.join(&template).as_os_str().len() > 260);
++        {
++            let repo = Repository::init(&source).unwrap();
++            let mut index = repo.index().unwrap();
++            index.add_path(&template).unwrap();
++            index.write().unwrap();
++            let tree_id = index.write_tree().unwrap();
++            let tree = repo.find_tree(tree_id).unwrap();
++            let signature = Signature::now("PyAppify Test", "test@example.com").unwrap();
++            repo.commit(Some("HEAD"), &signature, &signature, "template fixture", &tree, &[]).unwrap();
++        }
++        {
++            let cloned = super::clone_repository(
++                source.to_str().unwrap(), &destination, git2::FetchOptions::new()
++            ).unwrap();
++            let config = cloned.config().unwrap().open_level(git2::ConfigLevel::Local).unwrap();
++            assert!(config.get_bool("core.longpaths").unwrap());
++            assert_eq!(std::fs::read(destination.join(&template)).unwrap(), b"template fixture");
++        }
++        std::fs::remove_dir_all(root).unwrap();
++    }
++
+     fn commit_and_tag(repo: &Repository, root: &std::path::Path, tag: &str, message: &str) {
+         let file_path = root.join("history.txt");
+         std::fs::write(&file_path, format!("{tag}\n")).unwrap();
+diff --git a/src-tauri/src/utils/error.rs b/src-tauri/src/utils/error.rs
+index 1a39f9b..1397e3d 100644
+--- a/src-tauri/src/utils/error.rs
++++ b/src-tauri/src/utils/error.rs
+@@ -41,7 +41,10 @@ impl serde::Serialize for Error {
+     where
+         S: serde::ser::Serializer,
+     {
+-        let error_message = self.to_string();
++        let error_message = match self {
++            Self::Anyhow(error) => format!("{error:#}"),
++            _ => self.to_string(),
++        };
+         let error_kind = match self {
+             Self::Io(_) => ErrorKind::Io(error_message),
+             Self::Regex(_) => ErrorKind::Regex(error_message),
+@@ -62,6 +65,20 @@ impl From<&'static str> for Error {
+     }
+ }
+ 
++#[cfg(test)]
++mod tests {
++    #[test]
++    fn launcher_profiles_report_the_underlying_clone_error() {
++        let error = super::Error::Anyhow(
++            anyhow::anyhow!("Filename too long").context("Git clone failed for Personal")
++        );
++        let serialized = serde_json::to_value(error).unwrap();
++        let message = serialized["message"].as_str().unwrap();
++        assert!(message.contains("Git clone failed for Personal"));
++        assert!(message.contains("Filename too long"));
++    }
++}
++
+ #[macro_export]
+ macro_rules! err {
+     ($msg:literal $(,)?) => {
+diff --git a/src-tauri/src/utils/file.rs b/src-tauri/src/utils/file.rs
+index 97a33ea..19d3683 100644
+--- a/src-tauri/src/utils/file.rs
++++ b/src-tauri/src/utils/file.rs
+@@ -1,9 +1,10 @@
+ use crate::utils::command::new_cmd;
+ use anyhow::{Context, Result};
++use std::collections::HashSet;
+ use std::path::{Path, PathBuf};
+ use std::{fs, io};
+ use std::{thread, time::Duration};
+-use tracing::{debug, info};
++use tracing::{debug, info, warn};
+ use walkdir::WalkDir;
+ 
+ const COPY_RETRY_ATTEMPTS: usize = 12;
+@@ -66,6 +67,36 @@ where
+     copy_dir_recursive_filtered_inner(src, src, dst, exclude, should_exclude)
+ }
+ 
++pub fn copy_repository_files_sync(repository: &git2::Repository, destination: &Path) -> Result<()> {
++    let source = repository.workdir().context("Repository has no working directory")?;
++    let index = repository.index().context("Failed to read repository index")?;
++    let mut tracked_paths = HashSet::new();
++    for entry in index.iter() {
++        let path = PathBuf::from(std::str::from_utf8(&entry.path)?);
++        for ancestor in path.ancestors() {
++            if !ancestor.as_os_str().is_empty() {
++                tracked_paths.insert(ancestor.to_path_buf());
++            }
++        }
++    }
++
++    copy_dir_recursive_filtered_sync(source, destination, &[".git"], &|relative_path| {
++        // Ignore rules apply to untracked files. Tracked modules and their parent
++        // directories must reach the application even when an ignore rule matches.
++        if tracked_paths.contains(relative_path) {
++            return false;
++        }
++        match repository.status_should_ignore(relative_path) {
++            Ok(ignored) => ignored,
++            Err(error) => {
++                warn!("Could not read ignore status for {}: {}. Copying it.", relative_path.display(), error);
++                false
++            }
++        }
++    })?;
++    Ok(())
++}
++
+ fn copy_dir_recursive_filtered_inner<F>(
+     root_src: &Path,
+     src: &Path,
+@@ -147,6 +178,10 @@ pub fn sync_delete_extra_files(working_dir: &Path, repo_dir: &Path) -> io::Resul
+         if relative_path.as_os_str().is_empty() && working_path != working_dir {
+             return false; // Should not happen if strip_prefix is correct
+         }
++        // Account settings belong to the user and must survive source/version switches.
++        if relative_path.starts_with("configs") {
++            return false;
++        }
+         let repo_equivalent_path = repo_dir.join(relative_path);
+ 
+         if entry.file_type().is_dir() {
+@@ -240,12 +275,66 @@ pub async fn delete_dir_if_exist(working_dir_path: &Path) -> Result<()> {
+ #[cfg(test)]
+ mod tests {
+     use super::copy_dir_recursive_filtered_sync;
++    use std::path::Path;
+     #[cfg(windows)]
+     use super::is_retryable_copy_error;
+     #[cfg(windows)]
+     use std::io;
+     use std::{fs, time::SystemTime};
+ 
++    #[test]
++    fn launcher_profiles_copy_tracked_files_despite_ignore_rules() {
++        let unique = SystemTime::now().duration_since(SystemTime::UNIX_EPOCH).unwrap().as_nanos();
++        let root = std::env::temp_dir().join(format!("pyappify-tracked-copy-{}-{unique}", std::process::id()));
++        let source = root.join("repo");
++        let destination = root.join("working");
++        fs::create_dir_all(source.join("src/gui")).unwrap();
++        fs::create_dir_all(source.join("ignored/nested")).unwrap();
++        fs::write(source.join(".gitignore"), "src/gui/CharacterCodeTab.py\nignored/\n*.tmp\n").unwrap();
++        fs::write(source.join("src/gui/CharacterCodeTab.py"), "class CharacterCodeTab: pass").unwrap();
++        fs::write(source.join("ignored/nested/registered.py"), "tracked module").unwrap();
++        fs::write(source.join("ignored/cache.py"), "untracked cache").unwrap();
++        fs::write(source.join("scratch.tmp"), "untracked scratch").unwrap();
++        {
++            let repository = git2::Repository::init(&source).unwrap();
++            let mut index = repository.index().unwrap();
++            for path in [".gitignore", "src/gui/CharacterCodeTab.py", "ignored/nested/registered.py"] {
++                index.add_path(Path::new(path)).unwrap();
++            }
++            index.write().unwrap();
++
++            super::copy_repository_files_sync(&repository, &destination).unwrap();
++        }
++
++        assert_eq!(fs::read_to_string(destination.join("src/gui/CharacterCodeTab.py")).unwrap(), "class CharacterCodeTab: pass");
++        assert!(destination.join("ignored/nested/registered.py").is_file());
++        assert!(!destination.join("ignored/cache.py").exists());
++        assert!(!destination.join("scratch.tmp").exists());
++        assert!(!destination.join(".git").exists());
++        fs::remove_dir_all(root).unwrap();
++    }
++
++    #[test]
++    fn launcher_profiles_keep_user_settings_and_remove_old_code() {
++        let root = std::env::temp_dir().join(format!(
++            "pyappify-profile-settings-{}-{}",
++            std::process::id(),
++            SystemTime::now().duration_since(SystemTime::UNIX_EPOCH).unwrap().as_nanos()
++        ));
++        let working = root.join("working");
++        let repository = root.join("repo");
++        fs::create_dir_all(working.join("configs")).unwrap();
++        fs::create_dir_all(&repository).unwrap();
++        fs::write(working.join("configs/settings.json"), "{\"keep\":true}").unwrap();
++        fs::write(working.join("old_character.py"), "old code").unwrap();
++
++        super::sync_delete_extra_files(&working, &repository).unwrap();
++
++        assert_eq!(fs::read_to_string(working.join("configs/settings.json")).unwrap(), "{\"keep\":true}");
++        assert!(!working.join("old_character.py").exists());
++        fs::remove_dir_all(root).unwrap();
++    }
++
+     #[cfg(windows)]
+     #[test]
+     fn retries_windows_file_mapping_and_lock_errors() {

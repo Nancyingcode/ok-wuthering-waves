@@ -56,6 +56,10 @@ If `.venv` does not exist, use `python` instead of the interpreter path above.
 
 ## 测试 / Testing
 
+如需在同一启动器中切换官方版和个人版，请参阅[个人启动器配置与构建](personal-launcher.md)。
+
+To switch between Official and Personal versions in one launcher, see [Personal Launcher](personal-launcher.md).
+
 提交 PR 前，请尽量运行相关测试，并在 PR 描述中说明测试结果。
 
 Before opening a PR, please run the relevant tests when possible and include the results in the PR description.
