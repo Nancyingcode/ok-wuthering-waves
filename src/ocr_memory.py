@@ -1,22 +1,208 @@
 import gc
+import threading
 import time
+import weakref
 from functools import wraps
 
+import psutil
+
 from ok.task.TaskExecutor import TaskExecutor
+from ok.task.exceptions import FinishedException
 from ok.util.logger import Logger
 
 logger = Logger.get_logger(__name__)
 
 OCR_IDLE_RELEASE_SECONDS = 60.0
+OCR_MAX_CALLS = 128
+OCR_MAX_AGE_SECONDS = 300.0
+OCR_MEMORY_GROWTH_BYTES = 512 * 1024 * 1024
+
+
+def _private_memory():
+    try:
+        return getattr(psutil.Process().memory_info(), 'private', None)
+    except (psutil.Error, OSError):
+        return None
+
+
+def _cpu_model(model):
+    predictors = (getattr(model, 'text_detector', None), getattr(model, 'text_recognizer', None))
+    return all(getattr(predictor, 'is_openvino', False)
+               and getattr(predictor, 'is_npu', None) is False
+               for predictor in predictors)
+
+
+def _drain_model(model):
+    for name in ('text_detector', 'text_recognizer', 'text_classifier'):
+        predictor = getattr(model, name, None)
+        queue = getattr(predictor, '_async_queue', None)
+        if queue is not None:
+            queue.wait_all()
+
+
+class ManagedOCR:
+    """Keep cached callers attached while replacing the model between inferences."""
+
+    def __init__(self, executor, name, model=None):
+        # Notification adapters retain this object after dropping their factory.
+        # A weak reference avoids keeping the entire executor alive through them.
+        self._executor = weakref.ref(executor)
+        self._exit_event = executor.exit_event
+        self._name = name
+        self._condition = threading.Condition(threading.Lock())
+        self._model = model
+        self._active = 0
+        self._recycling = False
+        self._pending_reason = None
+        self._last_used = time.monotonic()
+        self._reset_usage()
+
+    def _reset_usage(self):
+        self._calls = 0
+        self._created_at = time.monotonic()
+        self._memory_baseline = _private_memory()
+        self._runtime_recycling = self._model is not None and _cpu_model(self._model)
+
+    def _check_cancelled(self):
+        if self._exit_event.is_set():
+            raise FinishedException()
+        executor = self._executor()
+        if executor is not None and executor.is_executor_thread():
+            executor.check_enabled(check_pause=False)
+
+    def _acquire(self):
+        with self._condition:
+            # A pending recycle closes admission before the last caller exits;
+            # otherwise overlapping notification/task calls could starve cleanup.
+            while self._recycling or self._pending_reason is not None:
+                self._check_cancelled()
+                self._condition.wait(0.1)
+            self._check_cancelled()
+            if self._model is not None:
+                self._active += 1
+                self._last_used = time.monotonic()
+                return self._model
+            self._recycling = True
+        try:
+            executor = self._executor()
+            if executor is None:
+                raise FinishedException()
+            model = executor._create_ocr_lib(self._name)
+            with self._condition:
+                self._model = model
+                self._reset_usage()
+                self._active += 1
+                self._last_used = time.monotonic()
+                return model
+        finally:
+            with self._condition:
+                self._recycling = False
+                self._condition.notify_all()
+
+    def prepare(self):
+        model = self._acquire()
+        model = None
+        self._finish_call(counted=False)
+
+    def ocr(self, *args, **kwargs):
+        return self._call('ocr', *args, **kwargs)
+
+    def __call__(self, *args, **kwargs):
+        return self._call(None, *args, **kwargs)
+
+    def _call(self, method, *args, **kwargs):
+        model = self._acquire()
+        try:
+            if method is None:
+                return model(*args, **kwargs)
+            return getattr(model, method)(*args, **kwargs)
+        finally:
+            # A local model or bound method would keep native memory alive until
+            # after new callers are admitted. Clear it before closing the lease.
+            model = None
+            self._finish_call()
+
+    def _recycle_reason(self, now):
+        if not self._runtime_recycling:
+            return None
+        if self._calls >= OCR_MAX_CALLS:
+            return 'call limit'
+        if now - self._created_at >= OCR_MAX_AGE_SECONDS:
+            return 'model age'
+        memory = _private_memory()
+        has_memory_growth = (memory is not None and self._memory_baseline is not None
+                             and memory - self._memory_baseline >= OCR_MEMORY_GROWTH_BYTES)
+        if has_memory_growth:
+            # Process-wide growth is a safety signal, not attribution to OCR.
+            return 'private memory growth'
+        return None
+
+    def _finish_call(self, counted=True):
+        with self._condition:
+            self._active -= 1
+            self._last_used = time.monotonic()
+            if counted:
+                self._calls += 1
+                if self._pending_reason is None:
+                    self._pending_reason = self._recycle_reason(self._last_used)
+            should_recycle = self._active == 0 and self._pending_reason is not None
+            if should_recycle:
+                self._recycling = True
+            self._condition.notify_all()
+        if should_recycle:
+            self._recycle()
+
+    def release_idle(self, now):
+        with self._condition:
+            can_release = (self._model is not None and not self._recycling and self._active == 0
+                           and now - self._last_used >= OCR_IDLE_RELEASE_SECONDS)
+            if not can_release:
+                return
+            self._pending_reason = 'idle'
+            self._recycling = True
+        self._recycle()
+
+    def _recycle(self):
+        reason = self._pending_reason
+        model = self._model
+        try:
+            # Python inference may have returned just before its native callback
+            # leaves the queue. Drain it before dropping any model ownership.
+            _drain_model(model)
+            self._model = None
+            model = None
+            gc.collect()
+            logger.info(f'Released OpenVINO OCR model {self._name}: {reason}; reload on next use')
+        except Exception as error:
+            # Failed draining must leave the old model intact. Reset the budget
+            # so repeated calls do not retry a failed cleanup on every inference.
+            logger.error(f'Could not release OpenVINO OCR model {self._name}', error)
+        finally:
+            with self._condition:
+                self._reset_usage()
+                self._pending_reason = None
+                self._recycling = False
+                self._condition.notify_all()
 
 
 def _ocr_lib(self, name="default"):
     # Reads must share the eviction lock so a cache hit cannot race with removal.
     with self._ocr_lib_lock:
         self._ocr_idle_since = None
+        options = (self.config.get('ocr') or {}).get(name) or {}
+        uses_openvino = (options.get('lib') == 'onnxocr'
+                         and (options.get('params') or {}).get('use_openvino', False))
         if name not in self._ocr_lib:
-            self._ocr_lib[name] = self._create_ocr_lib(name)
-        return self._ocr_lib[name]
+            if uses_openvino:
+                self._ocr_lib[name] = ManagedOCR(self, name)
+            else:
+                self._ocr_lib[name] = self._create_ocr_lib(name)
+        elif uses_openvino and not isinstance(self._ocr_lib[name], ManagedOCR):
+            self._ocr_lib[name] = ManagedOCR(self, name, self._ocr_lib[name])
+        instance = self._ocr_lib[name]
+    if isinstance(instance, ManagedOCR):
+        instance.prepare()
+    return instance
 
 
 def _release_idle_ocr(self):
@@ -41,28 +227,17 @@ def _release_idle_ocr(self):
                 return
             if now - idle_since < OCR_IDLE_RELEASE_SECONDS:
                 return
-            ocr_config = self.config.get('ocr') or {}
-            names = []
-            for name in self._ocr_lib:
-                options = ocr_config.get(name) or {}
-                uses_openvino = (options.get('lib') == 'onnxocr'
-                                 and (options.get('params') or {}).get('use_openvino', False))
-                if uses_openvino:
-                    names.append(name)
-            retired = [self._ocr_lib.pop(name) for name in names]
+            instances = [instance for instance in self._ocr_lib.values()
+                         if isinstance(instance, ManagedOCR)]
         finally:
             self._ocr_lib_lock.release()
-    if retired:
-        # Drop only cache ownership. Borrowed models must finish inference before
-        # destruction, and native cleanup must run outside both executor locks.
-        retired.clear()
-        gc.collect()
-        logger.info(f'Released idle OpenVINO OCR models: {names}; reload on next use')
+    for instance in instances:
+        instance.release_idle(now)
 
 
 def install_ocr_idle_release():
-    """Bridge ok-script 2.0.22 until it provides native idle OCR eviction."""
-    if hasattr(TaskExecutor, '_release_idle_ocr'):
+    """Manage OpenVINO model ownership for both active and idle executors."""
+    if getattr(TaskExecutor, '_okww_managed_ocr', False):
         return
 
     wait_for_activity = TaskExecutor._wait_for_activity
@@ -86,10 +261,11 @@ def install_ocr_idle_release():
             self._ocr_idle_since = None
         return result
 
-    # Keep this application workaround out of installed package files; remove it
-    # once the minimum ok-script version includes the same lifecycle protection.
+    # Native idle eviction alone cannot rotate models retained by notifications.
+    # Keep one managed hook even when an installed library already has that hook.
     TaskExecutor.ocr_lib = _ocr_lib
     TaskExecutor._release_idle_ocr = _release_idle_ocr
     TaskExecutor._wait_for_activity = wait_with_ocr_release
     TaskExecutor._run_job = run_job_with_ocr_activity
     TaskExecutor.next_task = next_task_with_ocr_activity
+    TaskExecutor._okww_managed_ocr = True

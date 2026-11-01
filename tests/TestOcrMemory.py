@@ -1,24 +1,39 @@
+import gc
 import threading
 import unittest
 import weakref
+from concurrent.futures import ThreadPoolExecutor
 from types import SimpleNamespace
 from unittest.mock import Mock, patch
 
+import psutil
+
+from ok.notification.ppocr import NotificationPPOCR
 from ok.task.TaskExecutor import ExecutorJob, TaskExecutor
-from ok.task.exceptions import TaskDisabledException
-from src.ocr_memory import install_ocr_idle_release
+from ok.task.exceptions import FinishedException, TaskDisabledException
+from src import ocr_memory
+from src.ocr_memory import ManagedOCR, install_ocr_idle_release
 
 
 class Model:
-    pass
+    def __init__(self):
+        self.text_detector = SimpleNamespace(is_openvino=True, is_npu=False, _async_queue=Mock())
+        self.text_recognizer = SimpleNamespace(is_openvino=True, is_npu=False, _async_queue=Mock())
+        self.ocr = Mock(return_value=[[[[[0, 0], [10, 0], [10, 10], [0, 10]], ('text', .9)]]])
+
+    def __call__(self, *args, **kwargs):
+        return self.ocr(*args, **kwargs)
 
 
 class TestOcrMemory(unittest.TestCase):
     def setUp(self):
         install_ocr_idle_release()
         self.clock = self.enterContext(patch('src.ocr_memory.time.monotonic', return_value=100.0))
+        self.read_private_memory = ocr_memory._private_memory
+        self.memory = self.enterContext(patch('src.ocr_memory._private_memory', return_value=0))
         self.enterContext(patch.object(TaskExecutor, 'load_tr'))
         self.enterContext(patch.object(TaskExecutor, 'init_default_ocr'))
+        self.models = []
         self.executor = self.make_executor()
 
     def make_executor(self):
@@ -27,23 +42,34 @@ class TestOcrMemory(unittest.TestCase):
             global_config=Mock(), config={'ocr': {
                 'lib': 'onnxocr', 'params': {'use_openvino': True},
             }})
-        executor._create_ocr_lib = Mock(side_effect=lambda name: Model())
+
+        def create_model(name):
+            model = Model()
+            self.models.append(weakref.ref(model))
+            return model
+
+        executor._create_ocr_lib = Mock(side_effect=create_model)
         return executor
 
     def wait_idle(self, now):
         self.clock.return_value = now
-        # A zero timeout exercises the scheduler hook without real-time sleeps.
         return self.executor._wait_for_activity(0)
 
-    def test_idle_threshold_releases_and_next_access_recreates_model(self):
-        reference = weakref.ref(self.executor.ocr_lib())
+    def pool(self):
+        pool = self.enterContext(ThreadPoolExecutor(max_workers=4))
+        self.addCleanup(self.executor.exit_event.set)
+        return pool
+
+    def test_idle_threshold_unloads_model_and_preserves_proxy(self):
+        proxy = self.executor.ocr_lib()
+        reference = self.models[-1]
         self.wait_idle(100)
         self.wait_idle(159.999)
         self.assertIsNotNone(reference())
         self.wait_idle(160)
         self.assertIsNone(reference())
-        self.assertEqual(self.executor._ocr_lib, {})
-        self.assertIsInstance(self.executor.ocr_lib(), Model)
+        self.assertIs(self.executor._ocr_lib['default'], proxy)
+        self.assertIs(self.executor.ocr_lib(), proxy)
         self.assertEqual(self.executor._create_ocr_lib.call_count, 2)
 
     def test_every_busy_state_requires_a_new_full_idle_period(self):
@@ -54,7 +80,9 @@ class TestOcrMemory(unittest.TestCase):
         }
         for attribute, value in cases.items():
             with self.subTest(attribute=attribute):
-                reference = weakref.ref(self.executor.ocr_lib())
+                self.clock.return_value = 100
+                self.executor.ocr_lib()
+                reference = self.models[-1]
                 self.wait_idle(100)
                 original = getattr(self.executor, attribute)
                 setattr(self.executor, attribute, value)
@@ -67,10 +95,12 @@ class TestOcrMemory(unittest.TestCase):
                 self.wait_idle(260)
                 self.assertIsNone(reference())
 
-    def test_enabled_tasks_block_release_until_scheduler_is_paused(self):
+    def test_enabled_tasks_block_idle_release_until_paused(self):
         for attribute in ('onetime_tasks', 'trigger_tasks'):
             with self.subTest(attribute=attribute):
-                reference = weakref.ref(self.executor.ocr_lib())
+                self.clock.return_value = 100
+                self.executor.ocr_lib()
+                reference = self.models[-1]
                 self.wait_idle(100)
                 setattr(self.executor, attribute, [SimpleNamespace(enabled=True)])
                 self.executor.paused = False
@@ -83,7 +113,8 @@ class TestOcrMemory(unittest.TestCase):
                 setattr(self.executor, attribute, [])
 
     def test_cached_ocr_access_restarts_idle_period(self):
-        reference = weakref.ref(self.executor.ocr_lib())
+        self.executor.ocr_lib()
+        reference = self.models[-1]
         self.wait_idle(100)
         self.clock.return_value = 159
         self.executor.ocr_lib()
@@ -92,10 +123,36 @@ class TestOcrMemory(unittest.TestCase):
         self.assertIsNotNone(reference())
         self.wait_idle(220)
         self.assertIsNone(reference())
-        self.assertEqual(self.executor._create_ocr_lib.call_count, 1)
 
-    def test_release_never_waits_for_model_initialization_lock(self):
-        reference = weakref.ref(self.executor.ocr_lib())
+    def test_notification_cached_proxy_rebuilds_after_idle_release(self):
+        notification = NotificationPPOCR(self.executor.ocr_lib)
+        expected = [('text', 0, 0, 10, 10)]
+        self.assertEqual(notification.recognize('frame'), expected)
+        proxy = notification._instance
+        reference = self.models[-1]
+        self.wait_idle(100)
+        self.wait_idle(160)
+        self.assertIsNone(reference())
+        self.assertIsNone(notification._instance_factory)
+        self.assertEqual(notification.recognize('next frame'), expected)
+        self.assertIs(notification._instance, proxy)
+        self.assertEqual(self.executor._create_ocr_lib.call_count, 2)
+
+    def test_cached_notification_use_delays_idle_release(self):
+        proxy = self.executor.ocr_lib()
+        reference = self.models[-1]
+        self.wait_idle(100)
+        self.clock.return_value = 150
+        proxy.ocr('notification')
+        self.wait_idle(160)
+        self.wait_idle(209.999)
+        self.assertIsNotNone(reference())
+        self.wait_idle(210)
+        self.assertIsNone(reference())
+
+    def test_idle_release_never_waits_for_initialization_lock(self):
+        self.executor.ocr_lib()
+        reference = self.models[-1]
         self.wait_idle(100)
         with self.executor._ocr_lib_lock:
             self.wait_idle(160)
@@ -103,60 +160,315 @@ class TestOcrMemory(unittest.TestCase):
         self.wait_idle(161)
         self.assertIsNone(reference())
 
-    def test_other_ocr_backends_keep_their_models(self):
+    def test_other_ocr_backends_keep_raw_models(self):
         self.executor.config['ocr'].update({
             'cpu': {'lib': 'onnxocr', 'params': {'use_openvino': False}},
             'rapid': {'lib': 'rapidocr'},
         })
-        references = {name: weakref.ref(self.executor.ocr_lib(name))
-                      for name in ('default', 'cpu', 'rapid')}
+        references = {}
+        for name in ('default', 'cpu', 'rapid'):
+            instance = self.executor.ocr_lib(name)
+            self.assertEqual(isinstance(instance, ManagedOCR), name == 'default')
+            references[name] = self.models[-1]
+        instance = None
         self.wait_idle(100)
         self.wait_idle(160)
         self.assertIsNone(references['default']())
         self.assertIsNotNone(references['cpu']())
         self.assertIsNotNone(references['rapid']())
 
-    def test_concurrent_borrower_keeps_model_alive_until_return(self):
-        borrowed = threading.Event()
-        finished = threading.Event()
-        references = []
+    def test_call_budget_recycles_during_a_running_task(self):
+        self.executor.current_task = object()
+        self.executor.paused = False
+        self.executor.trigger_tasks = [SimpleNamespace(enabled=True)]
+        proxy = self.executor.ocr_lib()
+        reference = self.models[-1]
+        with patch('src.ocr_memory.OCR_MAX_CALLS', 2):
+            result = proxy.ocr('first')
+            self.assertIsNotNone(reference())
+            self.assertEqual(proxy.ocr('second'), result)
+            self.assertIsNone(reference())
+            self.assertEqual(proxy.ocr('third'), result)
+        self.assertEqual(self.executor._create_ocr_lib.call_count, 2)
+        self.assertIs(self.executor._ocr_lib['default'], proxy)
 
-        def borrow_model():
-            model = self.executor.ocr_lib()
-            references.append(weakref.ref(model))
-            borrowed.set()
-            finished.wait(5)
+    def test_model_age_recycles_at_inference_boundary(self):
+        proxy = self.executor.ocr_lib()
+        reference = self.models[-1]
+        self.clock.return_value += ocr_memory.OCR_MAX_AGE_SECONDS
+        proxy.ocr('frame')
+        self.assertIsNone(reference())
 
-        worker = threading.Thread(target=borrow_model)
-        worker.start()
-        self.addCleanup(worker.join, 5)
-        self.addCleanup(finished.set)
-        self.assertTrue(borrowed.wait(5))
+    def test_private_memory_growth_recycles_model(self):
+        proxy = self.executor.ocr_lib()
+        reference = self.models[-1]
+        self.memory.return_value = ocr_memory.OCR_MEMORY_GROWTH_BYTES - 1
+        proxy.ocr('first')
+        self.assertIsNotNone(reference())
+        self.memory.return_value += 1
+        proxy.ocr('second')
+        self.assertIsNone(reference())
+        proxy.ocr('third')
+        reference = self.models[-1]
+        proxy.ocr('fourth')
+        self.assertIsNotNone(reference())
+
+    def test_call_budget_still_works_without_private_memory_metric(self):
+        self.memory.return_value = None
+        proxy = self.executor.ocr_lib()
+        reference = self.models[-1]
+        with patch('src.ocr_memory.OCR_MAX_CALLS', 1):
+            proxy.ocr('frame')
+        self.assertIsNone(reference())
+
+    def test_unavailable_process_metric_is_optional(self):
+        with patch('src.ocr_memory.psutil.Process', side_effect=psutil.AccessDenied()):
+            self.assertIsNone(self.read_private_memory())
+
+    def test_npu_uses_idle_eviction_without_runtime_rotation(self):
+        model = Model()
+        model.text_detector.is_npu = True
+        model.text_recognizer.is_npu = True
+        self.executor._create_ocr_lib.side_effect = None
+        self.executor._create_ocr_lib.return_value = model
+        proxy = self.executor.ocr_lib()
+        with patch('src.ocr_memory.OCR_MAX_CALLS', 1):
+            proxy.ocr('frame')
+            proxy.ocr('frame')
+        self.assertIs(proxy._model, model)
+        self.assertEqual(self.executor._create_ocr_lib.call_count, 1)
         self.wait_idle(100)
         self.wait_idle(160)
-        self.assertEqual(self.executor._ocr_lib, {})
-        self.assertIsNotNone(references[0]())
-        self.assertIsNot(self.executor.ocr_lib(), references[0]())
-        finished.set()
-        worker.join(5)
-        self.assertFalse(worker.is_alive())
-        self.assertIsNone(references[0]())
+        self.assertIsNone(proxy._model)
 
-    def test_model_finalizer_runs_outside_executor_locks(self):
+    def test_callable_interface_preserves_arguments_and_results(self):
+        proxy = self.executor.ocr_lib()
+        result = proxy('frame', cls=False)
+        self.assertEqual(result, self.models[-1]().ocr.return_value)
+        self.models[-1]().ocr.assert_called_once_with('frame', cls=False)
+
+    def test_initialization_failure_allows_retry(self):
+        create = self.executor._create_ocr_lib.side_effect
+        self.executor._create_ocr_lib.side_effect = ValueError('initialization failed')
+        with self.assertRaisesRegex(ValueError, 'initialization failed'):
+            self.executor.ocr_lib()
+        self.executor._create_ocr_lib.side_effect = create
+        self.assertIsInstance(self.executor.ocr_lib(), ManagedOCR)
+
+    def test_concurrent_initialization_creates_only_one_model(self):
+        entered = threading.Event()
+        finish = threading.Event()
+        self.addCleanup(finish.set)
+        create = self.executor._create_ocr_lib.side_effect
+
+        def slow_create(name):
+            entered.set()
+            if not finish.wait(5):
+                raise TimeoutError('test initialization did not finish')
+            return create(name)
+
+        self.executor._create_ocr_lib.side_effect = slow_create
+        pool = self.pool()
+        first = pool.submit(self.executor.ocr_lib)
+        self.assertTrue(entered.wait(5))
+        second = pool.submit(self.executor.ocr_lib)
+        self.wait_idle(100)
+        self.wait_idle(160)
+        finish.set()
+        self.assertIs(first.result(5), second.result(5))
+        self.assertEqual(self.executor._create_ocr_lib.call_count, 1)
+
+    def test_exception_and_cancellation_do_not_leak_active_calls(self):
+        proxy = self.executor.ocr_lib()
+        for error in (ValueError('inference failed'), TaskDisabledException()):
+            with self.subTest(error=type(error).__name__):
+                self.models[-1]().ocr.side_effect = error
+                with patch('src.ocr_memory.OCR_MAX_CALLS', 1):
+                    with self.assertRaises(type(error)):
+                        proxy.ocr('frame')
+                gc.collect()
+                self.assertIsNone(proxy._model)
+                self.assertIsNotNone(proxy.ocr('next frame'))
+
+    def test_drain_failure_preserves_old_model_and_allows_further_calls(self):
+        proxy = self.executor.ocr_lib()
+        reference = self.models[-1]
+        reference().text_detector._async_queue.wait_all.side_effect = RuntimeError('drain failed')
+        with patch('src.ocr_memory.OCR_MAX_CALLS', 1), patch.object(ocr_memory.logger, 'error') as log:
+            result = proxy.ocr('frame')
+            self.assertIs(proxy._model, reference())
+            log.assert_called_once()
+        self.assertEqual(proxy.ocr('next frame'), result)
+
+    def test_finalizer_runs_outside_all_locks_and_before_new_model(self):
+        proxy = self.executor.ocr_lib()
+        reference = self.models[-1]
         available_locks = []
-        executor = self.executor
+        drained = []
+        reference().text_detector._async_queue.wait_all.side_effect = lambda: drained.append('detector')
+        reference().text_recognizer._async_queue.wait_all.side_effect = lambda: drained.append('recognizer')
 
         def on_destroy():
-            for lock in (executor.lock, executor._ocr_lib_lock):
+            for lock in (self.executor.lock, self.executor._ocr_lib_lock, proxy._condition):
                 acquired = lock.acquire(blocking=False)
                 available_locks.append(acquired)
                 if acquired:
                     lock.release()
 
-        weakref.finalize(self.executor.ocr_lib(), on_destroy)
+        weakref.finalize(reference(), on_destroy)
+        with patch('src.ocr_memory.OCR_MAX_CALLS', 1):
+            proxy.ocr('first')
+        self.assertEqual(available_locks, [True, True, True])
+        self.assertEqual(drained, ['detector', 'recognizer'])
+        self.assertIsNone(reference())
+        self.assertEqual(self.executor._create_ocr_lib.call_count, 1)
+        proxy.ocr('second')
+        self.assertEqual(self.executor._create_ocr_lib.call_count, 2)
+
+    def test_overlapping_inferences_close_admission_before_rotation(self):
+        proxy = self.executor.ocr_lib()
+        reference = self.models[-1]
+        started = {name: threading.Event() for name in ('first', 'second')}
+        finish = {name: threading.Event() for name in ('first', 'second')}
+        waiting = threading.Event()
+        for event in finish.values():
+            self.addCleanup(event.set)
+
+        def infer(frame):
+            started[frame].set()
+            if not finish[frame].wait(5):
+                raise TimeoutError('test inference did not finish')
+            return frame
+
+        reference().ocr.side_effect = infer
+        wait = proxy._condition.wait
+
+        def wait_for_rotation(timeout):
+            waiting.set()
+            return wait(timeout)
+
+        pool = self.pool()
+        with patch('src.ocr_memory.OCR_MAX_CALLS', 1), \
+                patch.object(proxy._condition, 'wait', side_effect=wait_for_rotation):
+            first = pool.submit(proxy.ocr, 'first')
+            second = pool.submit(proxy.ocr, 'second')
+            self.assertTrue(started['first'].wait(5))
+            self.assertTrue(started['second'].wait(5))
+            finish['first'].set()
+            self.assertEqual(first.result(5), 'first')
+            third = pool.submit(proxy.ocr, 'third')
+            self.assertTrue(waiting.wait(5))
+            self.assertIsNotNone(reference())
+            self.assertEqual(self.executor._create_ocr_lib.call_count, 1)
+            finish['second'].set()
+            self.assertEqual(second.result(5), 'second')
+            self.assertIsNotNone(third.result(5))
+        self.assertIsNone(reference())
+        self.assertEqual(self.executor._create_ocr_lib.call_count, 2)
+
+    def test_native_drain_blocks_requests_and_shutdown_cancels_waiters(self):
+        proxy = self.executor.ocr_lib()
+        reference = self.models[-1]
+        draining = threading.Event()
+        finish_drain = threading.Event()
+        self.addCleanup(finish_drain.set)
+
+        def drain():
+            draining.set()
+            if not finish_drain.wait(5):
+                raise TimeoutError('test drain did not finish')
+
+        reference().text_detector._async_queue.wait_all.side_effect = drain
+        pool = self.pool()
+        with patch('src.ocr_memory.OCR_MAX_CALLS', 1):
+            first = pool.submit(proxy.ocr, 'first')
+            self.assertTrue(draining.wait(5))
+            second = pool.submit(proxy.ocr, 'second')
+            self.executor.exit_event.set()
+            with self.assertRaises(FinishedException):
+                second.result(5)
+            self.assertIsNotNone(reference())
+            self.assertEqual(self.executor._create_ocr_lib.call_count, 1)
+            finish_drain.set()
+            first.result(5)
+        self.assertIsNone(reference())
+
+    def test_idle_release_does_not_interrupt_an_active_cached_call(self):
+        proxy = self.executor.ocr_lib()
+        reference = self.models[-1]
+        entered = threading.Event()
+        finish = threading.Event()
+        self.addCleanup(finish.set)
+
+        def infer(frame):
+            entered.set()
+            if not finish.wait(5):
+                raise TimeoutError('test inference did not finish')
+            return frame
+
+        reference().ocr.side_effect = infer
         self.wait_idle(100)
+        pool = self.pool()
+        future = pool.submit(proxy.ocr, 'frame')
+        self.assertTrue(entered.wait(5))
         self.wait_idle(160)
-        self.assertEqual(available_locks, [True, True])
+        self.assertIsNotNone(reference())
+        finish.set()
+        self.assertEqual(future.result(5), 'frame')
+        self.wait_idle(219.999)
+        self.assertIsNotNone(reference())
+        self.wait_idle(220)
+        self.assertIsNone(reference())
+
+    def test_cancelled_executor_job_does_not_wait_for_model_recycling(self):
+        proxy = self.executor.ocr_lib()
+        draining = threading.Event()
+        finish_drain = threading.Event()
+        waiting = threading.Event()
+        self.addCleanup(finish_drain.set)
+
+        def drain():
+            draining.set()
+            if not finish_drain.wait(5):
+                raise TimeoutError('test drain did not finish')
+
+        self.models[-1]().text_detector._async_queue.wait_all.side_effect = drain
+        job = ExecutorJob(self.executor, lambda: None)
+
+        def run_waiting_job():
+            self.executor.thread = threading.current_thread()
+            self.executor.current_job = job
+            return proxy.ocr('cancelled')
+
+        wait = proxy._condition.wait
+
+        def wait_for_rotation(timeout):
+            waiting.set()
+            return wait(timeout)
+
+        pool = self.pool()
+        with patch('src.ocr_memory.OCR_MAX_CALLS', 1), \
+                patch.object(proxy._condition, 'wait', side_effect=wait_for_rotation):
+            first = pool.submit(proxy.ocr, 'first')
+            self.assertTrue(draining.wait(5))
+            second = pool.submit(run_waiting_job)
+            self.assertTrue(waiting.wait(5))
+            job._cancel_requested.set()
+            with self.assertRaises(TaskDisabledException):
+                second.result(5)
+            self.assertFalse(first.done())
+            finish_drain.set()
+            first.result(5)
+        self.executor.current_job = None
+
+    def test_notification_cached_proxy_recycles_during_active_task(self):
+        self.executor.current_task = object()
+        notification = NotificationPPOCR(self.executor.ocr_lib)
+        with patch('src.ocr_memory.OCR_MAX_CALLS', 1):
+            expected = notification.recognize('first')
+            self.assertIsNone(self.models[-1]())
+            self.assertEqual(notification.recognize('second'), expected)
+        self.assertEqual(self.executor._create_ocr_lib.call_count, 2)
 
     def test_jobs_without_ocr_restart_idle_period_on_all_outcomes(self):
         def fail():
@@ -164,7 +476,9 @@ class TestOcrMemory(unittest.TestCase):
 
         for outcome in ('success', 'failure', 'cancelled'):
             with self.subTest(outcome=outcome):
-                reference = weakref.ref(self.executor.ocr_lib())
+                self.clock.return_value = 100
+                self.executor.ocr_lib()
+                reference = self.models[-1]
                 self.wait_idle(100)
                 job = ExecutorJob(self.executor, fail if outcome == 'failure' else lambda: 42)
                 if outcome == 'cancelled':
@@ -175,15 +489,15 @@ class TestOcrMemory(unittest.TestCase):
                     self.assertIsInstance(job.future.exception(), ValueError)
                 elif outcome == 'success':
                     self.assertEqual(job.future.result(), 42)
-                self.assertIsNone(self.executor.current_job)
                 self.wait_idle(160)
                 self.wait_idle(219.999)
                 self.assertIsNotNone(reference())
                 self.wait_idle(220)
                 self.assertIsNone(reference())
 
-    def test_gui_task_dispatch_without_ocr_restarts_idle_period(self):
-        reference = weakref.ref(self.executor.ocr_lib())
+    def test_gui_dispatch_without_ocr_restarts_idle_period(self):
+        self.executor.ocr_lib()
+        reference = self.models[-1]
         self.wait_idle(100)
         task = SimpleNamespace(enabled=True, name='GUI task')
         self.executor.onetime_tasks = [task]
@@ -202,7 +516,8 @@ class TestOcrMemory(unittest.TestCase):
 
     def run_scheduler(self, kind, outcome):
         executor = self.make_executor()
-        reference = weakref.ref(executor.ocr_lib())
+        executor.ocr_lib()
+        reference = self.models[-1]
 
         def run():
             if kind == 'gui':
@@ -221,8 +536,7 @@ class TestOcrMemory(unittest.TestCase):
             executor.paused = False
             executor.next_frame = Mock(return_value=object())
         else:
-            job = ExecutorJob(executor, run)
-            executor._job_queue.append(job)
+            executor._job_queue.append(ExecutorJob(executor, run))
 
         def advance_idle(timeout):
             self.clock.return_value += 60
@@ -237,29 +551,51 @@ class TestOcrMemory(unittest.TestCase):
         self.assertIsNone(reference())
         self.assertIsNone(executor.current_task)
         self.assertIsNone(executor.current_job)
-        if kind == 'job':
-            self.assertTrue(job.future.done())
 
     def test_scheduler_releases_after_gui_success_failure_and_cancellation(self):
         for outcome in ('success', 'failure', 'cancelled'):
             with self.subTest(outcome=outcome):
+                self.clock.return_value = 100
                 self.run_scheduler('gui', outcome)
 
     def test_scheduler_releases_after_job_success_failure_and_cancellation(self):
         for outcome in ('success', 'failure', 'cancelled'):
             with self.subTest(outcome=outcome):
+                self.clock.return_value = 100
                 self.run_scheduler('job', outcome)
 
-    def test_repeated_install_and_native_support_do_not_wrap_twice(self):
+    def test_proxy_wraps_a_preexisting_raw_model(self):
+        model = self.executor._create_ocr_lib('default')
+        self.executor._ocr_lib['default'] = model
+        proxy = self.executor.ocr_lib()
+        self.assertIsInstance(proxy, ManagedOCR)
+        self.assertIs(proxy._model, model)
+        self.assertEqual(self.executor._create_ocr_lib.call_count, 1)
+
+    def test_proxy_does_not_keep_executor_alive(self):
+        proxy = self.executor.ocr_lib()
+        reference = weakref.ref(self.executor)
+        self.executor = None
+        gc.collect()
+        self.assertIsNone(reference())
+        self.assertIsNotNone(proxy)
+
+    def test_repeated_install_does_not_wrap_twice(self):
         methods = (TaskExecutor.ocr_lib, TaskExecutor._wait_for_activity,
                    TaskExecutor._run_job, TaskExecutor.next_task)
         install_ocr_idle_release()
         self.assertEqual(methods, (TaskExecutor.ocr_lib, TaskExecutor._wait_for_activity,
                                   TaskExecutor._run_job, TaskExecutor.next_task))
-        native = type('NativeExecutor', (), {'_release_idle_ocr': Mock()})
+
+    def test_native_idle_support_does_not_skip_runtime_recycling(self):
+        native = type('NativeExecutor', (), {
+            '_release_idle_ocr': Mock(), '_wait_for_activity': Mock(),
+            '_run_job': Mock(), 'next_task': Mock(),
+        })
         with patch('src.ocr_memory.TaskExecutor', native):
             install_ocr_idle_release()
-        self.assertNotIn('ocr_lib', vars(native))
+        self.assertTrue(native._okww_managed_ocr)
+        self.assertIs(native._release_idle_ocr, ocr_memory._release_idle_ocr)
 
 
 if __name__ == '__main__':
