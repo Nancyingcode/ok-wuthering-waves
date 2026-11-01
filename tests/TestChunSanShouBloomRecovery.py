@@ -650,6 +650,76 @@ class TestChunSanShouBloomRecovery(unittest.TestCase):
         self.assertEqual(self.rotation.BLOOM_TAIL_FLOOR_SPAN, 1.0)
         self.assertEqual(self.rotation.BLOOM_TAIL_FLOOR_RETRIES, 2)
         self.assertEqual(self.rotation.BLOOM_TAIL_CONSUMED_RATIO, 0.65)
+        self.assertEqual(self.rotation.BLOOM_TAIL_UNREADABLE_MAX_AGE, 1.0)
+        self.assertEqual(self.rotation.BLOOM_TAIL_UNREADABLE_MIN_SAMPLES, 3)
+        self.assertEqual(self.rotation.BLOOM_TAIL_UNREADABLE_FORTE_MAX, 0.25)
+
+    @staticmethod
+    def boundary_blackout_samples():
+        # 1.2.9 实测 9.000 段原文 history：最后可读样本 8.046 forte=0.156，之后回路环读不到。
+        return [(7.093, 0.304), (7.187, 0.304), (7.64, 0.18), (7.75, 0.23),
+                (7.859, 0.156), (7.937, 0.156), (8.046, 0.156)]
+
+    def test_unreadable_grace_takes_boundary_blackout_with_full_consumption(self):
+        # 9.000 段：sample_age=0.954、samples=7、consumed_ratio=0.836、基线 0.95，判据层唯一可救的形态。
+        samples = self.boundary_blackout_samples()
+        status = Rotation.bloom_tail_status(samples, 9.0, 0.95)
+        self.assertEqual(status['reason'], 'stale_sample')
+        self.assertAlmostEqual(status['consumed_ratio'], 0.836)
+        self.assertTrue(Rotation.bloom_unreadable_grace_allowed(
+            samples, 9.0, 8.0, -1.0, True, True, False, 0.95))
+
+    def test_unreadable_grace_rejects_blackout_without_consumption_evidence(self):
+        # 8.016 / 8.047 两段整段零可读样本（samples=0、consumed_ratio=-1、基线未建立），属识别层，不接手。
+        self.assertFalse(Rotation.bloom_unreadable_grace_allowed(
+            [], 8.016, 8.0, -1.0, True, True, False, None))
+        # 窗口只剩一两个样本时无法证明这段输出真打掉了回路，交回原超时。
+        self.assertFalse(Rotation.bloom_unreadable_grace_allowed(
+            [(7.96, 0.156), (8.03, 0.156)], 8.05, 8.0, -1.0, True, True, False, 0.95))
+
+    def test_unreadable_grace_rejects_each_gate(self):
+        samples = self.boundary_blackout_samples()
+
+        def allowed(**overrides):
+            params = dict(samples=samples, output_wall=9.0, output_budget=8.0, forte=-1.0,
+                          same_character=True, marker_visible=True, in_liberation=False,
+                          baseline=0.95)
+            params.update(overrides)
+            return Rotation.bloom_unreadable_grace_allowed(
+                params['samples'], params['output_wall'], params['output_budget'], params['forte'],
+                params['same_character'], params['marker_visible'], params['in_liberation'],
+                params['baseline'])
+
+        self.assertTrue(allowed())
+        # 预算未耗尽 / 宽限已超出 BLOOM_TAIL_GRACE / 本帧可读 / 消耗不足 / 断流过久 / 标记消失 / 不在场 / 解放态。
+        self.assertFalse(allowed(output_wall=7.9))
+        self.assertFalse(allowed(output_wall=10.5))
+        self.assertFalse(allowed(forte=0.156))
+        self.assertFalse(allowed(baseline=0.20))
+        self.assertFalse(allowed(output_wall=9.4))
+        self.assertFalse(allowed(marker_visible=False))
+        self.assertFalse(allowed(same_character=False))
+        self.assertFalse(allowed(in_liberation=True))
+
+    def test_unreadable_grace_end_to_end_marks_timing_flag(self):
+        # 端到端：回路从 0.95 稳定消耗到 0.15，预算边界后回路环读不到；不得再以 output timeout /
+        # tail progress lost 收场，bloom timing 行须带 unreadable_grace=True。
+        def forte(**kwargs):
+            at = self.clock[0] - 100
+            if at < 2.0:
+                return 0.95
+            if at < 7.1:
+                return 0.95 - (at - 2.0) * (0.80 / 5.1)
+            return -1.0
+
+        self.char.get_forte.side_effect = forte
+        with patch.object(self.char, 'logger') as logger:
+            self.rotation.bloom_output(self.char)
+        logs = [entry.args[0] for entry in logger.info.call_args_list]
+        self.assertIn('outcome=completed', logs[-1])
+        self.assertIn('unreadable_grace=True', logs[-1])
+        self.assertIn('floor=False', logs[-1])
+        self.assertTrue(any('bloom unreadable grace completion' in line for line in logs))
 
 
 if __name__ == '__main__':

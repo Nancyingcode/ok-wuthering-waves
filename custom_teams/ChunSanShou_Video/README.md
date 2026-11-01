@@ -1,6 +1,23 @@
 # 椿 / 散华 / 守岸人导入队伍
 
-当前源码为 `1.2.8` 三格地板出口候选，位于 `1.2.7` 之上（`1.2.7` = 中高位稳态出口，位于 `1.2.6` 之上；`1.2.6` = 贴零稳态出口，位于 `1.2.5` 之上；`1.2.5` = 尾段基线改用本段观测峰值、回滚满格滑动窗口，位于 `1.2.4` 之上；`1.2.4` = 满格停滞滑动窗口，位于 `1.2.3` 之上；`1.2.3` = 满格平台期抖动修复，位于 `1.2.2` 之上；`1.2.2` = 满格平台期补按，位于 `1.2.1` 之上；`1.2.1` = 开花尾段判据与起步消耗修复，位于 `1.2.0` 之上；`1.2.0` = 输出段丢锁恢复，位于 `1.1.9` 之上；`1.1.9` = 回切正倒计时保护，基于 `1.1.7` 功能版本，保留 `1.1.6` 六秒回切恢复）。`1.1.8` 连续采样及包装已从生产实现撤下，诊断源码与原包备份在 `downloads/chunsanshou-1.1.9/`，历史采样测试归档到 `downloads/chunsanshou-1.1.8/diagnostic-tests/`。
+当前源码为 `1.2.9` 预算边界读数断流出口候选，位于 `1.2.8` 之上（`1.2.8` = 三格地板出口，位于 `1.2.7` 之上；`1.2.7` = 中高位稳态出口，位于 `1.2.6` 之上；`1.2.6` = 贴零稳态出口，位于 `1.2.5` 之上；`1.2.5` = 尾段基线改用本段观测峰值、回滚满格滑动窗口，位于 `1.2.4` 之上；`1.2.4` = 满格停滞滑动窗口，位于 `1.2.3` 之上；`1.2.3` = 满格平台期抖动修复，位于 `1.2.2` 之上；`1.2.2` = 满格平台期补按，位于 `1.2.1` 之上；`1.2.1` = 开花尾段判据与起步消耗修复，位于 `1.2.0` 之上；`1.2.0` = 输出段丢锁恢复，位于 `1.1.9` 之上；`1.1.9` = 回切正倒计时保护，基于 `1.1.7` 功能版本，保留 `1.1.6` 六秒回切恢复）。`1.1.8` 连续采样及包装已从生产实现撤下，诊断源码与原包备份在 `downloads/chunsanshou-1.1.9/`，历史采样测试归档到 `downloads/chunsanshou-1.1.8/diagnostic-tests/`。
+
+## 1.2.9 变更
+
+`1.2.8` 三轮实战（5121 / 5230 / 4331，均值 4894，11 花 / 8 完成，重击 0.45 次每花）里地板出口零触发（`floor=True` 0 次、`bloom floor completion` 0 次），判「未验证」。三次未收尾退出时 `forte` 分别是 `-1` / `-1` / `0.156`，没有一次落在 `(BLOOM_COMPLETE_FORTE, BLOOM_TAIL_FLOOR_MAX]` 地板窗内，原「放开重击门」的归因作废：真正的第一失败源是「输出预算耗尽那一刻回路读数不可读」。
+
+取证（2026-11-01，MCP artifact `8679e3375ccd4d2ea1893e5b0a29388e`）：8.016 / 8.047 两段 `cast confirmed` 之后整段 8 秒 `budding_forte=-1`、`samples=0`、`consumed_ratio=-1`、`heavy_retries=0`、`history=[]`，同段 `check_target Retry/Release` 刷屏，属识别 / 丢锁层；9.000 段可读证据完整（`history` 到 8.046 `forte=0.156`、`consumed_ratio=0.836`、9.000 时 `sample_age=0.954`、`samples=5`），首帧不可读起于 8.562，随后 0.4 秒复核到期被判 `tail progress lost`，属判据层。`1.2.9` 只接 9.000 形态，另两段按反例护栏继续判 `output timeout`。
+
+`1.2.9` 只加这一条出口，`BLOOM_COMPLETE_FORTE = 0.06`、`BLOOM_ENDED_FORTE = 0.05`、1.2.6 贴零判据、1.2.7 中高位判据与 1.2.8 地板判据一律不动，八个硬约束常量（`BLOOM_OUTPUT_TIMEOUT = 8`、`BLOOM_WALL_TIMEOUT = 16`、`PHASE_TIMEOUT = 24`、`BLOOM_TAIL_GRACE = 2`、`BLOOM_TAIL_RECHECK = 0.4`、`BLOOM_FEEDBACK_TIMEOUT = 1.2`、`BLOOM_TARGET_WAIT_MAX = 2.0`、`BLOOM_TARGET_WAIT_TOTAL = 3.0`）继续不动，`bloom_tail_status` 的因子与先后顺序也不动：
+
+- **新增常量**：`BLOOM_TAIL_UNREADABLE_MAX_AGE = 1.0`（连续断流上限，同时是最后可读样本年龄上限）、`BLOOM_TAIL_UNREADABLE_MIN_SAMPLES = 3`、`BLOOM_TAIL_UNREADABLE_FORTE_MAX = 0.25`；消耗比复用 `BLOOM_TAIL_CONSUMED_RATIO = 0.65`。
+- **`Rotation.bloom_unreadable_grace_allowed`**：六组条件同时成立才放行——① `output_wall >= output_budget` 且 `output_wall - output_budget <= BLOOM_TAIL_GRACE`（不新开预算，宽限到期仍由 `check_hard_budget` 抛 `tail grace timeout`）；② 本帧 `forte` 不可读（`not 0 <= forte <= 1`）；③ 同角色在场、`camellya_budding` 可见、非解放态；④ 尾段 `reason` 只接受 `insufficient_samples` / `stale_sample`（`progressing` 继续走宽限，其余一律不接）；⑤ `samples >= 3` 且 `sample_age <= 1.0`（即连续不可读不超过 1.0 秒）；⑥ 最后可读读数 `<= 0.25` 且 `consumed_ratio >= 0.65`（按本段观测峰值，峰值不可读时不开放）。
+- **出口形态**：成立时 `outcome=completed`、不进恢复分支；新增 `椿散守 bloom unreadable grace completion` 日志与 `capture_bloom_diagnostics('unreadable_grace', 'boundary_read_blackout')`，`bloom timing` 行新增 `unreadable_grace=True/False`（与 `steady=` / `floor=` 并列，作为本版确证字段）。插入点刻意排在 `check_recheck_deadline()` 之前：9.000 段正是复核 0.4 秒到期被判死，判据再准也来不及上场。
+- **完全不动**：`record_bloom_progress` 的入账链（`forte < 0` 仍只按 1.5 秒裁剪、不清窗）、`maintain_bloom_heavy` 的重试上限与平台期判据、`bloom_entry_recheck_allowed` 的两个分支。
+
+三个成员文件的 `PACKAGE_ID` 必须同为 `chunsanshou-v1.2.9-bloom-unreadable-grace`。
+
+`1.2.9` 两轮实战 3702 / 5320（均值 4511，极差 1618，σ≈1144，8 花 / 3 完成，重击 0.5 次每花），`unreadable_grace=True` 0 次、`bloom unreadable grace completion` 0 次，验收判「未验证」而非无效：判据一次都没上场。四次超时归因：2 次 `insufficient_samples`（`samples=0`、`consumed_ratio=-1`，零证据形态属识别层，被正确拒绝）、1 次 `outside_tail`（`forte=0.823`，真实未打完）、1 次 `insufficient_decreases`（`forte=0.279`、`samples=13`、`sample_age=0.0`、`consumed_ratio=0.697`、`steady_flat=True`、`steady_hold=1.437`，落在 1.2.8 地板窗 ≤0.10 与 1.2.7 中高位窗 0.20–0.75 且需 `outside_tail` 之间的缝隙，留待 1.2.10）。实战验收仍按 `.dsh-tmp/任务3-8秒收尾验收基线.md`，并须在日志里读到 `bloom unreadable grace completion` 或 `unreadable_grace=True` 才算该出口上场，读不到即仍判「未验证」，不许拿均值变好当通过；8.016 / 8.047 型零证据形态必须仍以 `output timeout` 退出，否则是误放行。`tail_extra` 过冲、`bloom_resume_budget`、P5 丢锁与 P7 回切继续单列。
 
 ## 1.2.8 变更
 
@@ -17,7 +34,7 @@
 
 三个成员文件的 `PACKAGE_ID` 必须同为 `chunsanshou-v1.2.8-bloom-floor-exit`。
 
-`1.2.8` 尚无实战数据。实战验收仍按 `.dsh-tmp/任务3-8秒收尾验收基线.md`，并须在日志里读到 `bloom floor completion` 或 `floor=True` 才算该出口上场；`tail_extra` 0.093 过冲、`bloom_resume_budget`、P5 丢锁与 P7 回切继续单列。
+`1.2.8` 三轮实战 5121 / 5230 / 4331（均值 4894，11 花 / 8 完成，重击 0.45 次每花），地板出口零触发（`floor=True` 0 次、`bloom floor completion` 0 次），验收判「未验证」而非无效：判据一次都没上场。实战验收仍按 `.dsh-tmp/任务3-8秒收尾验收基线.md`，并须在日志里读到 `bloom floor completion` 或 `floor=True` 才算该出口上场；`tail_extra` 0.093 过冲、`bloom_resume_budget`、P5 丢锁与 P7 回切继续单列。
 
 ## 1.2.7 变更
 
@@ -164,9 +181,9 @@
 python custom_teams/ChunSanShou_Video/build.py
 ```
 
-没有本地 `.venv` 时用 `python`；构建只依赖标准库，默认输出 `dist/ChunSanShou_Video_Codex_1.2.8.zip`。
+没有本地 `.venv` 时用 `python`；构建只依赖标准库，默认输出 `dist/ChunSanShou_Video_Codex_1.2.9.zip`。
 
-导入时暂停自动战斗，确认版本 `1.2.8`、三个角色均使用“导入代码”。该导入队伍需要显式导入启用。
+导入时暂停自动战斗，确认版本 `1.2.9`、三个角色均使用“导入代码”。该导入队伍需要显式导入启用。
 
 ## 验证与证据
 

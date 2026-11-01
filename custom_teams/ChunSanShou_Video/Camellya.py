@@ -214,6 +214,13 @@ class Rotation:
     BLOOM_TAIL_FLOOR_MAX = 0.10
     BLOOM_TAIL_FLOOR_SPAN = 1.0
     BLOOM_TAIL_FLOOR_RETRIES = 2
+    # 1.2.9：预算边界读数断流出口。三段失败里只有 9.000 那段属判据层：最后可读样本 8.046
+    # forte=0.156、consumed_ratio=0.836、9.000 时 sample_age=0.954，首帧不可读起于 8.562，随后被
+    # 0.4 秒复核到期判成 tail progress lost。8.016 / 8.047 整段零可读样本（samples=0、
+    # consumed_ratio=-1），没有消耗证据，属识别层，不在这里放行。
+    BLOOM_TAIL_UNREADABLE_MAX_AGE = 1.0
+    BLOOM_TAIL_UNREADABLE_MIN_SAMPLES = 3
+    BLOOM_TAIL_UNREADABLE_FORTE_MAX = 0.25
     # 1.2.5：撤下 1.2.4 的满格滑动窗口快速通道，恢复 1.2.3 的平台期 0.4 秒 + 非满格 0.9 秒两条判据。
     BLOOM_COMPLETE_FORTE = 0.06
     CONCERTO_TOPUP_TIMEOUT = 2
@@ -1637,6 +1644,37 @@ class Rotation:
             return False
         return status['steady_flat']
 
+    @classmethod
+    def bloom_unreadable_grace_allowed(cls, samples, output_wall, output_budget, forte, same_character,
+                                       marker_visible, in_liberation, baseline=None):
+        """1.2.9：预算边界读数断流的受控出口。只接「可读证据齐全、边界后回路环读不到」这一种形态。
+
+        实测 9.000 段：最后可读样本 8.046 forte=0.156、consumed_ratio=0.836、9.000 时 sample_age=0.954，
+        首帧不可读出现在 8.562，随后 0.4 秒复核到期被判 tail progress lost——判据层能救的只有它。
+        8.016 / 8.047 两段整段零可读样本（samples=0、consumed_ratio=-1、基线从未建立），没有消耗证据，
+        一律仍判 output timeout；这里不新开预算，宽限到期仍由 check_hard_budget 抛 tail grace timeout。
+        """
+        if output_wall < output_budget:
+            return False
+        if output_wall - output_budget > cls.BLOOM_TAIL_GRACE:
+            return False
+        if 0 <= forte <= 1:
+            return False
+        if not same_character or not marker_visible or in_liberation:
+            return False
+        status = cls.bloom_tail_status(samples, output_wall, baseline)
+        if status['reason'] not in ('insufficient_samples', 'stale_sample'):
+            return False
+        # 顺带堵住「窗口只剩一两个样本」：此时无法证明这段输出真打掉了回路，交回原超时。
+        if status['samples'] < cls.BLOOM_TAIL_UNREADABLE_MIN_SAMPLES:
+            return False
+        # sample_age 即最后可读样本年龄，也等于连续不可读时长：断流过久说明早就断流，不是边界抖动。
+        if status['sample_age'] < 0 or status['sample_age'] > cls.BLOOM_TAIL_UNREADABLE_MAX_AGE:
+            return False
+        if not 0 <= status['forte'] <= cls.BLOOM_TAIL_UNREADABLE_FORTE_MAX:
+            return False
+        return status['consumed_ratio'] >= cls.BLOOM_TAIL_CONSUMED_RATIO
+
     @staticmethod
     def bloom_tail_progressing(samples, elapsed):
         return Rotation.bloom_tail_status(samples, elapsed)['reason'] == 'progressing'
@@ -1793,6 +1831,7 @@ class Rotation:
         tail_grace = False
         steady_completion = False
         floor_completion = False
+        unreadable_grace = False
         recheck_started = None
         progress_reset = None
         progress_reset_detail = None
@@ -2038,6 +2077,21 @@ class Rotation:
                                      f'status={floor_status}')
                     self.capture_bloom_diagnostics(char, 'floor_completion', 'three_grid_floor')
                     break
+                # 1.2.9：预算边界读数断流出口。必须排在 check_recheck_deadline() 之前：9.000 段就是
+                # 8.562 起不可读、0.4 秒复核到期被判 tail progress lost，判据再准也来不及上场。
+                if self.bloom_unreadable_grace_allowed(progress, sampled_output_wall, output_budget,
+                                                       current_forte, same_character,
+                                                       bool(current_marker), self.task.in_liberation,
+                                                       tail_baseline):
+                    outcome = 'completed'
+                    unreadable_grace = True
+                    grace_status = self.bloom_tail_status(progress, sampled_output_wall, tail_baseline)
+                    char.logger.info(f'椿散守 bloom unreadable grace completion elapsed={elapsed:.3f} '
+                                     f'output_wall={sampled_output_wall:.3f} budget={output_budget:.3f} '
+                                     f'forte={current_forte:.3f} '
+                                     f'heavy_retries={observation["retries"]} status={grace_status}')
+                    self.capture_bloom_diagnostics(char, 'unreadable_grace', 'boundary_read_blackout')
+                    break
                 # 软复核到期后只接受已经取得的结束证据，不再等待或发送输入；硬预算仍在最前。
                 check_recheck_deadline()
                 check_budget()
@@ -2082,11 +2136,12 @@ class Rotation:
                              f'target_wait={target_wait_wall:.3f} wait_count={wait_count} '
                              f'heavy_retries={observation["retries"]} tail_grace={tail_grace} '
                              f'steady={steady_completion} floor={floor_completion} '
+                             f'unreadable_grace={unreadable_grace} '
                              f'tail_extra={max(0.0, wall - target_wait_wall - output_budget):.3f} '
                              f'resumed={resumed} resume_forte={resume_forte:.3f} '
                              f'output_budget={output_budget:.3f} ended_frames={ended_frames}')
 
-PACKAGE_ID = 'chunsanshou-v1.2.8-bloom-floor-exit'
+PACKAGE_ID = 'chunsanshou-v1.2.9-bloom-unreadable-grace'
 
 
 class TeamMember:
