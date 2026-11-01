@@ -160,6 +160,7 @@ jobs:
 
       - name: Synchronize update repositories
         id: sync
+        if: github.repository == 'ok-oldking/ok-wuthering-waves'
         uses: ok-oldking/partial-sync-repo@master
         with:
           repos: |
@@ -176,7 +177,7 @@ jobs:
     needs: synchronize
     runs-on: windows-latest
     env:
-      SIGN_BUILD: ${{ needs.synchronize.outputs.is_release }}
+      SIGN_BUILD: ${{ needs.synchronize.outputs.is_release == 'true' && github.repository == 'ok-oldking/ok-wuthering-waves' }}
 
     steps:
       - name: Configure runner
@@ -422,7 +423,7 @@ jobs:
           files: pyappify_dist/*
 
       - name: Trigger distribution workflows
-        if: needs.synchronize.outputs.is_release == 'true'
+        if: needs.synchronize.outputs.is_release == 'true' && github.repository == 'ok-oldking/ok-wuthering-waves'
         shell: bash
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
