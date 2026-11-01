@@ -1,0 +1,21 @@
+name: "ok-ww"
+uac: true
+icon: "icons/icon.png"
+website: "https://github.com/Nancyingcode/ok-wuthering-waves"
+auto_start: false
+update_method: "MANUAL_UPDATE"
+
+profiles:
+  - name: "Official"
+    git_url: "https://cnb.cool/ok-oldking/ok-ww-update2.git"
+    admin: true
+    main_script: "main.py"
+    requires_python: "3.12"
+    requirements: "requirements.txt"
+    use_pythonw: true
+    pip_args: "--no-deps"
+    show_add_defender: true
+
+  - name: "Personal"
+    git_url: "git@github.com:Nancyingcode/ok-wuthering-waves.git"
+    pip_args: "--no-deps --index-url https://pypi.org/simple/"
