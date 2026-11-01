@@ -3,7 +3,7 @@ name: Sync issue triage labels
 on:
   workflow_dispatch:
   push:
-    branches: [master]
+    branches: [personal]
     paths:
       - .github/workflows/issue-triage.md
       - .github/workflows/sync_issue_labels.yml
