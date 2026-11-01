@@ -5,7 +5,10 @@ from pathlib import Path
 from ok import Box, ConfigOption, Icon
 from ok.util.GlobalConfig import create_basic_options
 from src.game_launcher import get_game_launch_arguments
+from src.ocr_memory import install_ocr_idle_release
 from src.task.process_feature import process_feature
+
+install_ocr_idle_release()
 
 version = "dev"
 
