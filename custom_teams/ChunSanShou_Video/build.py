@@ -7,7 +7,7 @@ from pathlib import Path
 
 SOURCE = Path(__file__).resolve().parent
 MEMBERS = ('team.json', 'Camellya.py', 'Sanhua.py', 'ShoreKeeper.py')
-DEFAULT_OUTPUT = SOURCE.parents[1] / 'dist/ChunSanShou_Video_Codex_1.2.9.zip'
+DEFAULT_OUTPUT = SOURCE.parents[1] / 'dist/ChunSanShou_Video_Codex_1.2.26.zip'
 
 
 def build_archive(destination=DEFAULT_OUTPUT):

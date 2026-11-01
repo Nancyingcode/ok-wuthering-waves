@@ -1,7 +1,7 @@
 from src.char.Sanhua import Sanhua as BuiltinSanhua
 from src.char.BaseChar import SwitchPriority
 
-PACKAGE_ID = 'chunsanshou-v1.2.9-bloom-unreadable-grace'
+PACKAGE_ID = 'chunsanshou-v1.2.26-bloom-boundary-trend'
 
 
 class TeamMember:

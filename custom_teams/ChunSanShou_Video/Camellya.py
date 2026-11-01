@@ -156,23 +156,7 @@ class CamellyaTeamVision:
             gap = 6 * width / 546
             contrast = sample(green, center) - max(sample(green, center - gap), sample(green, center + gap))
             observations.append((contrast >= 10, sample(lit, center) >= 0.3))
-        visible = sum(found for found, _ in observations)
-        if visible < 28:
-            return unknown
-        prefix = 0
-        for found, filled in observations:
-            if not found:
-                return {**unknown, 'visible_ticks': visible}
-            if not filled:
-                break
-            prefix += 1
-        if prefix == 0:
-            if any(filled for _, filled in observations):
-                return {**unknown, 'visible_ticks': visible}
-            return {'value': 0.0, 'state': 'empty', 'segments': 0, 'visible_ticks': visible}
-        # 只取左侧连续充能刻度，后方孤立的发光特效不计入剩余回路。
-        value = (14.5 + 13.5 * (prefix - 1) + 3) / 546
-        return {'value': min(1.0, value), 'state': 'filled', 'segments': prefix, 'visible_ticks': visible}
+        return Rotation.budding_forte_from_observations(observations)
 
     @staticmethod
     def budding_forte(char):
@@ -214,6 +198,19 @@ class Rotation:
     BLOOM_TAIL_FLOOR_MAX = 0.10
     BLOOM_TAIL_FLOOR_SPAN = 1.0
     BLOOM_TAIL_FLOOR_RETRIES = 2
+    # 1.2.18：贴地三格「仍在 progressing」的停滞出口。1.2.17 run2 实测一段 forte=0.082、
+    # steady_range=0.0、steady_hold=0.485、consumed_ratio=0.918、decreases=6、drop_age=0.657，
+    # reason 因此落在 progressing；1.2.8 地板出口要求 reason 为 stale_decrease/insufficient_decreases
+    # 且 steady_hold >= 1.0，被双重挡住，只能烧满 8+2 秒抛 tail grace timeout（tail_extra=+2.078）。
+    # 尾部平窗跨度取 0.4 秒：对应实测 0.485 秒的下侧，仍在下降的形态（跨度不足）交回原判据。
+    BLOOM_TAIL_FLOOR_STALL_SPAN = 0.4
+    # 1.2.19：整段零读数且全程丢锁的早退。1.2.18 run2 的 streak=84 段实测 samples=0、
+    # estimate_fallback=79、estimate_hold=7.986、estimate_drops=0，同段识别遥测只有一帧
+    # budding_forte=0.996/estimated=True，而 target_state=unlocked、target_match=('no_target', …)、
+    # check_target Retry/Release 69/65、heavy_retries=0、bloom target wait 一次都没调用：
+    # 8 秒里根本没有锁定目标，回路读数不可能下降，重击补按也判不出停滞。
+    # 丢锁跨度取 2.0 秒，与 1.2.11 的开环等待同量级；任何可读帧一律交回原判据。
+    BLOOM_OUTPUT_UNTARGETED_SPAN = 2.0
     # 1.2.9：预算边界读数断流出口。三段失败里只有 9.000 那段属判据层：最后可读样本 8.046
     # forte=0.156、consumed_ratio=0.836、9.000 时 sample_age=0.954，首帧不可读起于 8.562，随后被
     # 0.4 秒复核到期判成 tail progress lost。8.016 / 8.047 整段零可读样本（samples=0、
@@ -221,6 +218,45 @@ class Rotation:
     BLOOM_TAIL_UNREADABLE_MAX_AGE = 1.0
     BLOOM_TAIL_UNREADABLE_MIN_SAMPLES = 3
     BLOOM_TAIL_UNREADABLE_FORTE_MAX = 0.25
+    # 1.2.10：已消耗稳态尾段出口。1.2.9 实测 8.000 那次读数稳定停在 0.279（13 个样本、span=1.437、
+    # decreases=0、sample_age=0.0、consumed_ratio=0.697、steady_flat=True、steady_hold=1.437），
+    # 它高于 1.2.8 地板窗 0.10，又因 <=0.25 使 reason 永远落在 insufficient_decreases，1.2.7 的
+    # outside_tail 门与 1.2.9 的不可读门都接不住。该段 heavy_retries=0，因此这里不设补按门：
+    # 只要读数在预算耗尽后仍完全不动、且相对本段峰值已消耗 >=65%，就按完成收尾。
+    # 真未打完的 outside_tail（0.823 / 0.700，消耗 10.7% / 26.3%）仍按原超时退出，是这条出口的反例护栏。
+    BLOOM_TAIL_CONSUMED_SPAN = 1.0
+    # 1.2.20：已消耗尾段被一次上跳重置平窗时的出口。1.2.19 run1 实测 output_wall=8.000、
+    # forte=0.279、steady_range=0.0、steady_hold=0.61、steady_flat=False、drop_total=0.025、
+    # consumed_ratio=0.72、history_reset=forte_rise（7.375 时 0.279->0.304 一格上跳）。1.2.10 要求
+    # steady_hold >= 1.0 且 steady_flat=True，而 7.375 到 8.000 只剩 0.625 秒，平窗永远攒不满；
+    # forte=0.279 > 0.10 让地板窗接不住，读数可读又让不可读门接不住。平窗跨度取 0.4 秒。
+    BLOOM_TAIL_CONSUMED_STALL_SPAN = 0.4
+    # 1.2.11：零读数未开环早退。1.2.10 两轮里两次未收尾都是 cast confirmed 之后整段 8 秒零可读
+    # （samples=0、consumed_ratio=-1、history=[]、heavy_retries=0），同帧识别遥测是
+    # team_skill={'state': 'no_bloom_ring'}、legacy_red_percent=0.000000、开花标记不可见 —— 这一段
+    # 回路环根本没上屏，判据层没有任何输入可判。继续烧完 8 秒预算只会白占相位时间，
+    # 这里给一个明确早退把控制权交回轮转；不新开预算、不改任何收尾门限。
+    BLOOM_NOT_ENGAGED_AFTER = 2.0
+    # 1.2.13：开花回路环读数容差。实测 visible_ticks=39/40 时整帧仍判 unknown（单格被特效吃掉），
+    # 随后 8 秒窗口攒不到样本、被兜成 output timeout。这里允许高可见度下个别刻度缺失。
+    BLOOM_FORTE_MIN_VISIBLE = 28
+    BLOOM_FORTE_FALLBACK_MIN_VISIBLE = 34
+    BLOOM_FORTE_MISSING_TOLERANCE = 2
+    # 1.2.14：估算读数收敛约束。1.2.13 把缺失刻度按「仍充能」计入，得到的是偏高上界；实测整段每次
+    # 采样都走估算时，读数会长期钉在 0.996 / 0.799 这类高位（consumed_ratio 0.0 / 0.199），与
+    # 「真没打完」无法区分。这里给连续估算设上限：超过上限仍无精确读数，就当作本帧读不到，交回
+    # 1.2.9 的不可读门与原超时，不让上界无限期替代精确读数。
+    # 1.2.15：上限改按「连续估算秒数」表达，让降级时机与帧率解耦。
+    # 1.2.16：1.2.15 取的 1.2 秒在现场帧率下根本够不到。run 0588d04d 的 8 段开花里连续估算帧数最高
+    # 23 帧而 estimate_fallback 全为 0，说明 23 帧累计不足 1.2 秒（帧间隔 < 0.052 秒，≥19 帧/秒）；
+    # 而 1.2.14 的 10 帧上限在现场正是约 0.5 秒触发过（streak 18/24/68 均降级）。窗口降到 0.5 秒，
+    # 等于恢复 1.2.14 已验证的触发时机，同时保留按秒判定、不随帧率漂移。
+    BLOOM_FORTE_ESTIMATE_MAX_SECONDS = 0.5
+    # 1.2.17：估算读数仍在消耗时不降级。1.2.16 run1 的 estimate_fallback=62 段实测识别序列从
+    # 0.996 一路跌到 0.502 / 0.106，说明上界仍跟着真实消耗走；此时按「连续估算超时」降级会把
+    # 真实进度一起抹成 samples=0，判据层零输入后必然烧满预算。这里给估算读数也认下降证据：
+    # 本帧较上一估算帧下降 >= 0.015 即视为有效进度、降级窗口从本帧重开。
+    BLOOM_FORTE_ESTIMATE_DROP = 0.015
     # 1.2.5：撤下 1.2.4 的满格滑动窗口快速通道，恢复 1.2.3 的平台期 0.4 秒 + 非满格 0.9 秒两条判据。
     BLOOM_COMPLETE_FORTE = 0.06
     CONCERTO_TOPUP_TIMEOUT = 2
@@ -234,6 +270,37 @@ class Rotation:
     # 输出段丢锁空等必须与相位预算隔离：单次与累计各自封顶，等待不再吃掉相位预算。
     BLOOM_TARGET_WAIT_MAX = 2.0
     BLOOM_TARGET_WAIT_TOTAL = 3.0
+    # 1.2.21：输出段丢锁后的轻量重锁。1.2.20 批 run1 的 bloom output untargeted 段实测
+    # output_wall=3.562、unlocked_for=2.052（output 第 1.42 秒起丢锁），同段 check_target
+    # Release 80 次 / Retry 85 次，而 target lost try retarget 一次都没打印、wait_count=0：
+    # 锁早在输出段就丢了，却始终没有任何重锁动作，读数只能整段不可读、等 1.2.19 的 2 秒早退收段。
+    # 连续丢锁达到 3 帧才补一次 0.5 秒短重锁；等待额度仍从上面的单次 2 秒 / 累计 3 秒池里出，
+    # 不新开预算、不改任何收尾判据；整段最多两次，避免把「真锁不上」拖成另一种超时类型。
+    BLOOM_TARGET_RELOCK_FRAMES = 3
+    BLOOM_TARGET_RELOCK_TIMEOUT = 0.5
+    BLOOM_TARGET_RELOCK_MAX = 2
+    # 1.2.24：越过输出软预算后的单帧结束确认。1.2.23 批 8.437s 那朵实测 tail_grace 起于 8.016、
+    # 完成确认落在 8.324（forte 0.082 -> 0.032），0.308 秒过冲全部来自「连续两帧」的确认成本；
+    # 同段 budget_guard=28 全为空转复核，把复核点从 8+2 硬上限前移压不下一个字节。
+    # 预算内的结束确认仍必须连续两帧；边界后只多认一种「单帧 + 已消耗旁证」形态，
+    # 旁证门限复用 BLOOM_TAIL_CONSUMED_RATIO，真未打完与读数不可读形态一律交回原判据。
+    BLOOM_BOUNDARY_CONFIRM_RATIO = 0.65
+    # 1.2.25：标记仍在屏时的单帧结束确认门限。1.2.24 批 run2 实测 8.032 起宽限、读数已是 0.032
+    # （<=0.06）、consumed_ratio=0.943，但开花标记仍在屏，bloom_ended 与 1.2.24 的 boundary_confirm
+    # 都被 marker_visible 挡住，只能拖到 9.297 判 tail progress lost（tail_extra=+1.360）。
+    # 标记可见本身不足以否定「已打完」，但必须要求已消耗 >=90%；真未打完形态（1.2.21 批
+    # forte=0.675 / 消耗 32.3%）仍一律交回原超时。
+    BLOOM_BOUNDARY_MARKER_RATIO = 0.90
+    # 1.2.26：边界后仍在单调下降时的趋势收尾。1.2.25 批唯一那朵 +0.406（resumed=True、
+    # resume_forte=0.996）实测 8.000 时 forte=0.156、reason='progressing'、decreases=13、
+    # drop_total=0.247、consumed_ratio=0.943，读数一路降到 0.057 才在 8.343 命中 1.2.25 通道：
+    # 过冲全部花在「读数从 0.156 落到 <=0.06」这段真实下降上，而 1.2.25 只认结束阈值。
+    # 这里补一段「仍在下降」的独立门：0.20 与 1.2.8 地板窗同量级，只要求明显低于中段读数。
+    BLOOM_BOUNDARY_TREND_FORTE = 0.20
+    BLOOM_BOUNDARY_TREND_RATIO = 0.90
+    BLOOM_BOUNDARY_TREND_DECREASES = 3
+    BLOOM_BOUNDARY_TREND_DROP = 0.15
+    BLOOM_BOUNDARY_TREND_MAX_AGE = 0.25
 
     def __init__(self, task):
         self.task = task
@@ -1645,6 +1712,37 @@ class Rotation:
         return status['steady_flat']
 
     @classmethod
+    def bloom_floor_stall_allowed(cls, samples, output_wall, output_budget, forte, retries, same_character,
+                                  marker_visible, in_liberation, baseline=None):
+        """1.2.18：贴地三格「仍在 progressing」的停滞出口。与 1.2.8 地板出口并列，只接尾部已平这一种形态。
+
+        1.2.17 run2 实测：forte=0.082（三格）、steady_range=0.0、steady_hold=0.485、consumed_ratio=0.918、
+        decreases=6、drop_age=0.657，尾段 reason 因此落在 progressing。1.2.8 地板出口要求
+        reason in ('stale_decrease', 'insufficient_decreases') 且 steady_hold >= 1.0，这条被双重挡住，
+        8 秒软边界不接、10 秒硬上限直接抛 tail grace timeout（wall=10.078、tail_extra=+2.078）。
+        区分「还在往下跌」与「打不动」的证据：尾部平窗跨度、消耗比与补按用尽；读数不在地板窗、
+        尾部仍在变动或消耗不足的形态一律交回原判据。
+        """
+        if output_wall < output_budget:
+            return False
+        if not same_character or not marker_visible or in_liberation:
+            return False
+        if retries < cls.BLOOM_TAIL_FLOOR_RETRIES:
+            return False
+        if not cls.BLOOM_COMPLETE_FORTE < forte <= cls.BLOOM_TAIL_FLOOR_MAX:
+            return False
+        status = cls.bloom_tail_status(samples, output_wall, baseline)
+        if status['sample_age'] < 0 or status['sample_age'] > 0.5:
+            return False
+        if status['reason'] != 'progressing':
+            return False
+        if status['consumed_ratio'] < cls.BLOOM_TAIL_CONSUMED_RATIO:
+            return False
+        if status['steady_range'] < 0 or status['steady_range'] > cls.BLOOM_TAIL_STEADY_TOLERANCE:
+            return False
+        return status['steady_hold'] >= cls.BLOOM_TAIL_FLOOR_STALL_SPAN
+
+    @classmethod
     def bloom_unreadable_grace_allowed(cls, samples, output_wall, output_budget, forte, same_character,
                                        marker_visible, in_liberation, baseline=None):
         """1.2.9：预算边界读数断流的受控出口。只接「可读证据齐全、边界后回路环读不到」这一种形态。
@@ -1674,6 +1772,263 @@ class Rotation:
         if not 0 <= status['forte'] <= cls.BLOOM_TAIL_UNREADABLE_FORTE_MAX:
             return False
         return status['consumed_ratio'] >= cls.BLOOM_TAIL_CONSUMED_RATIO
+
+    @classmethod
+    def bloom_consumed_tail_allowed(cls, samples, output_wall, output_budget, forte, same_character,
+                                    marker_visible, in_liberation, baseline=None):
+        """1.2.10：已消耗稳态尾段出口。只接「预算耗尽后读数仍完全不动、且本段已消耗 >=65%」这一种形态。
+
+        实测 8.000 段：forte=0.279、samples=13、sample_age=0.0、consumed_ratio=0.697、decreases=0、
+        steady_flat=True、steady_hold=1.437，且该段 heavy_retries=0。它进不了 1.2.8 地板窗（>0.10），
+        又因 <=0.25 让 reason 落在 insufficient_decreases、永远不是 1.2.7 要求的 outside_tail，
+        1.2.9 只接不可读帧，于是三条既有出口全部漏掉它。
+        区分「还没打完」的证据是消耗比与零下降：0.823 / 0.700 两条 outside_tail 的消耗只有
+        10.7% / 26.3%，一律仍判 output timeout；读数不动 >=1.0 秒才认，避免把正在输出的一段截断。
+        """
+        if output_wall < output_budget:
+            return False
+        if not same_character or not marker_visible or in_liberation:
+            return False
+        if not 0 <= forte <= 1:
+            return False
+        status = cls.bloom_tail_status(samples, output_wall, baseline)
+        if status['reason'] not in ('insufficient_decreases', 'stale_decrease'):
+            return False
+        if status['sample_age'] < 0 or status['sample_age'] > 0.5:
+            return False
+        if status['consumed_ratio'] < cls.BLOOM_TAIL_CONSUMED_RATIO:
+            return False
+        if status['steady_range'] < 0 or status['steady_range'] > cls.BLOOM_TAIL_STEADY_TOLERANCE:
+            return False
+        if status['steady_hold'] < cls.BLOOM_TAIL_CONSUMED_SPAN:
+            return False
+        return status['steady_flat']
+
+    @classmethod
+    def bloom_consumed_tail_stall_allowed(cls, samples, output_wall, output_budget, forte, retries,
+                                          same_character, marker_visible, in_liberation, baseline=None):
+        """1.2.20：已消耗尾段被一次上跳重置平窗时的出口。与 1.2.10 并列，只接预算边界后的同一形态。
+
+        1.2.19 run1 实测 output_wall=8.000、forte=0.279、samples=45、steady_range=0.0、steady_hold=0.61、
+        steady_flat=False、drop_total=0.025、consumed_ratio=0.72，history_reset=forte_rise（7.375 时
+        0.279 -> 0.304，一格上跳）：1.2.10 要求 steady_hold >= 1.0 且 steady_flat=True，而 7.375 到
+        8.000 只剩 0.625 秒，平窗永远攒不满，只能烧满预算判 output timeout。forte=0.279 高于地板窗
+        0.10 让 1.2.8 接不住，读数可读又让 1.2.9 接不住。
+        区分「还没打完」的证据：净降幅必须已经小于 BLOOM_TAIL_DROP_TOTAL、尾部平窗跨度、已消耗 >=65%、
+        两次补按已用尽；仍在下降或消耗不足的形态一律交回原判据。
+        """
+        if output_wall < output_budget:
+            return False
+        if not same_character or not marker_visible or in_liberation:
+            return False
+        if retries < cls.BLOOM_TAIL_FLOOR_RETRIES:
+            return False
+        if not 0 <= forte <= 1:
+            return False
+        status = cls.bloom_tail_status(samples, output_wall, baseline)
+        if status['reason'] != 'insufficient_decreases':
+            return False
+        if status['sample_age'] < 0 or status['sample_age'] > 0.5:
+            return False
+        if status['consumed_ratio'] < cls.BLOOM_TAIL_CONSUMED_RATIO:
+            return False
+        if status['drop_total'] > cls.BLOOM_TAIL_DROP_TOTAL:
+            return False
+        if status['steady_range'] < 0 or status['steady_range'] > cls.BLOOM_TAIL_STEADY_TOLERANCE:
+            return False
+        return status['steady_hold'] >= cls.BLOOM_TAIL_CONSUMED_STALL_SPAN
+
+    @classmethod
+    def bloom_output_never_engaged(cls, samples, elapsed, forte, same_character, marker_visible,
+                                  in_liberation, marker_seen=False):
+        """1.2.11：开花输出整段零读数时的早退判据。
+
+        1.2.10 两轮两次未收尾同形：cast confirmed 后整段 8 秒 `samples=0`、`consumed_ratio=-1`、
+        `history=[]`、`heavy_retries=0`，同帧识别遥测 `team_skill.state='no_bloom_ring'`、
+        `legacy_red_percent=0.000000`、`camellya_budding` 不可见。回路环没上屏，`bloom_tail_status`
+        只会判 `insufficient_samples`，1.2.8 地板 / 1.2.9 不可读 / 1.2.10 已消耗三条出口都要求
+        至少一个可读样本，因此这段只能白烧到 8 秒再抛 output timeout。
+        区分「真在开花、只是某一帧读不到」的证据：本段必须一个可读样本都没有，且开花标记不可见；
+        只要出现过任一可读读数就交回原判据，避免截断真实输出。
+        """
+        if elapsed < cls.BLOOM_NOT_ENGAGED_AFTER:
+            return False
+        if not same_character or marker_visible or in_liberation:
+            return False
+        # 1.2.12：本段见过标记说明开花确实开过环，标记消失要交给 bloom_marker_end_allowed 收尾，
+        # 不能再当作「没开环」提前收段。
+        if marker_seen:
+            return False
+        if 0 <= forte <= 1:
+            return False
+        return not samples
+
+    @classmethod
+    def bloom_output_untargeted(cls, elapsed, target_unlocked_since, marker_visible, same_character,
+                               in_liberation, samples):
+        """1.2.19：整段零读数且全程丢锁时的早退判据。
+
+        1.2.18 run2 的 streak=84 段实测 samples=0、estimate_fallback=79、estimate_hold=7.986、
+        estimate_drops=0，同段识别遥测只有一帧 budding_forte=0.996/estimated=True，而
+        target_state=unlocked、target_match=('no_target', …)、check_target Retry/Release 69/65、
+        heavy_retries=0、bloom target wait 一次都没调用：这段 8 秒里没有锁定目标，读数不可能下降。
+        与 1.2.11 并列而不重叠：1.2.11 要求开花标记不可见（判定没开环），这里要求标记仍在屏
+        （确实开着花、只是没打到），且窗口必须零可读样本；判的是早退，不是完成。
+        """
+        if elapsed < cls.BLOOM_NOT_ENGAGED_AFTER:
+            return False
+        if target_unlocked_since is None:
+            return False
+        if elapsed - target_unlocked_since < cls.BLOOM_OUTPUT_UNTARGETED_SPAN:
+            return False
+        if not same_character or not marker_visible or in_liberation:
+            return False
+        return not samples
+
+    @classmethod
+    def bloom_target_relock_allowed(cls, unlocked_frames, relock_count, same_character,
+                                    marker_visible, in_liberation):
+        """1.2.21：输出段丢锁后是否补一次轻量重锁。
+
+        1.2.20 批 run1 的 untargeted 段实测 output_wall=3.562、unlocked_for=2.052，同段
+        check_target Release 80 次 / Retry 85 次，而 target lost try retarget 一次都没打印、
+        wait_count=0：锁定在输出段内丢掉了，却始终没有重锁动作，读数随之整段不可读。
+        这里只补「重锁动作」，不新开预算：等待额度沿用 BLOOM_TARGET_WAIT_MAX / TOTAL 池，
+        与 1.2.19 的丢锁早退并列 —— 重锁成功时早退窗口自然不复位，失败仍交回原早退与超时。
+        """
+        if not same_character or not marker_visible or in_liberation:
+            return False
+        if relock_count >= cls.BLOOM_TARGET_RELOCK_MAX:
+            return False
+        return unlocked_frames >= cls.BLOOM_TARGET_RELOCK_FRAMES
+
+    @classmethod
+    def bloom_boundary_trend_allowed(cls, forte, same_character, marker_seen, in_liberation,
+                                     elapsed, resumed, tail_grace, output_wall, output_budget,
+                                     samples, baseline=None):
+        """1.2.26：越过输出软预算后，读数仍在单调下降时的趋势收尾。
+
+        1.2.25 批唯一那朵 tail_extra=+0.406（resumed=True、resume_forte=0.996）实测边界时
+        forte=0.156、reason='progressing'、decreases=13、drop_total=0.247、consumed_ratio=0.943，
+        读数降到 0.057 才在 8.343 命中 1.2.25 通道：0.34 秒过冲全花在「从 0.156 落到 0.06」
+        这段真实下降上。这里只在宽限已开始后接一段仍在下降的形态：电流读数 <= 0.20、窗口内
+        至少三次下降、累计降幅 >= 0.15、样本新鲜、按本段峰值已消耗 >= 90%。真未打完的
+        outside_tail（1.2.24 批 0.873 / 消耗 12.4%）被读数与消耗两门同时挡住。
+        """
+        if output_wall < output_budget:
+            return False
+        if not tail_grace:
+            return False
+        if not same_character or in_liberation:
+            return False
+        if not marker_seen:
+            return False
+        if not (resumed or elapsed >= 5.1):
+            return False
+        if not 0 <= forte <= cls.BLOOM_BOUNDARY_TREND_FORTE:
+            return False
+        status = cls.bloom_tail_status(samples, output_wall, baseline)
+        if not 0 <= status['sample_age'] <= cls.BLOOM_BOUNDARY_TREND_MAX_AGE:
+            return False
+        if status['decreases'] < cls.BLOOM_BOUNDARY_TREND_DECREASES:
+            return False
+        if status['drop_total'] < cls.BLOOM_BOUNDARY_TREND_DROP:
+            return False
+        return status['consumed_ratio'] >= cls.BLOOM_BOUNDARY_TREND_RATIO
+
+    @classmethod
+    def bloom_boundary_confirm_allowed(cls, forte, same_character, marker_visible, marker_seen,
+                                       in_liberation, elapsed, resumed, tail_grace, output_wall,
+                                       output_budget, samples, baseline=None):
+        """1.2.24：越过输出软预算后的单帧结束确认。
+
+        1.2.23 批 8.437s 那朵实测 tail_grace 起于 8.016、完成确认落在 8.324，forte 由 0.082
+        掉到 0.032：这段边界后确实还在真实消耗，但收尾本身被「连续两帧」拖了一帧以上。
+        同段 budget_guard=28 只是空转复核（守的是 8+2 秒硬上限），所以过冲压不下去。
+        这里只在预算边界之后接受单帧证据，并要求已消耗到 65% 作旁证；预算内规则、两个结束
+        阈值与 1.2.7–1.2.23 的全部出口一律不动。
+        """
+        if output_wall < output_budget:
+            return False
+        # 1.2.24 只压缩「宽限已开始后仍在补确认」的过冲；首次越过边界一律交回原 check_budget 判宽限，
+        # 否则 1.2.5 低首帧形态会被这条通道提前收走（离线用例 test_low_first_readable_frame… 已复现）。
+        if not tail_grace:
+            return False
+        if not same_character or in_liberation:
+            return False
+        if not marker_seen:
+            return False
+        if not 0 <= forte <= cls.BLOOM_COMPLETE_FORTE:
+            return False
+        if not (resumed or elapsed >= 5.1):
+            return False
+        status = cls.bloom_tail_status(samples, output_wall, baseline)
+        consumed = status['consumed_ratio']
+        if marker_visible:
+            # 1.2.25：标记仍在屏不等于没打完。1.2.24 批 run2 实测读数已到 0.032/0.057（均 <=0.06）、
+            # consumed_ratio=0.943，却因标记可见被 bloom_ended 与本通道同时挡住，一路烧到
+            # tail progress lost（tail_extra=+1.360）。这里要求已消耗 >=90% 才认单帧结束。
+            return consumed >= cls.BLOOM_BOUNDARY_MARKER_RATIO
+        return consumed >= cls.BLOOM_BOUNDARY_CONFIRM_RATIO
+
+    @classmethod
+    def bloom_marker_end_allowed(cls, forte, same_character, marker_visible, marker_seen,
+                                 in_liberation, elapsed, resumed):
+        """1.2.12：读数整段不可读时，以开花标记消失作为结束证据。
+
+        1.2.10 两轮两次未收尾都是 cast 后整段 8 秒零可读（samples=0、consumed_ratio=-1），而
+        bloom_ended 要求 0 <= forte <= BLOOM_COMPLETE_FORTE，读数不可读时这条永远不成立；
+        1.2.11 的未开环早退又要求标记不可见，于是「开花真打完、标记已消失」这种形态只能烧满
+        8 秒判 output timeout。这里补一条与 bloom_ended 并列的结束确认：本段必须见过标记
+        （没见过说明没开环，交给 not_engaged）、当前标记已消失、同角色在场、非解放态，
+        连续两帧仍由 ended_frames 保证。读数可读的形态一律走原阈值，不用标记替代数值证据。
+        """
+        if not same_character or marker_visible or in_liberation:
+            return False
+        if not marker_seen:
+            return False
+        if 0 <= forte <= 1:
+            return False
+        return resumed or elapsed >= 5.1
+
+    @classmethod
+    def budding_forte_from_observations(cls, observations):
+        """1.2.13：把逐格观测换算成回路读数。纯 Python 实现，便于离线回放刻度缺失形态。
+
+        旧实现只要充能段里有一格 `not found` 就整帧判 unknown；实测 visible_ticks=39/40 时仍如此，
+        于是 8 秒窗口攒不到样本、被兜成 output timeout。这里在高可见度下把缺失格按「仍然充能」
+        计入，得到的是偏高的上界读数：上界只会让「已打完」更难成立，不会让收尾阈值提前触发。
+        """
+        unknown = {'value': -1.0, 'state': 'unknown', 'segments': 0, 'visible_ticks': 0}
+        visible = sum(found for found, _ in observations)
+        unknown_visible = {**unknown, 'visible_ticks': visible}
+        if visible < cls.BLOOM_FORTE_MIN_VISIBLE:
+            return unknown_visible
+        tolerated = visible >= cls.BLOOM_FORTE_FALLBACK_MIN_VISIBLE
+        prefix = 0
+        estimated = False
+        missing = 0
+        for found, filled in observations:
+            if not found:
+                if not tolerated:
+                    return unknown_visible
+                missing += 1
+                if missing > cls.BLOOM_FORTE_MISSING_TOLERANCE:
+                    return unknown_visible
+                prefix += 1
+                estimated = True
+                continue
+            if not filled:
+                break
+            prefix += 1
+        if prefix == 0:
+            if any(filled for _, filled in observations):
+                return unknown_visible
+            return {'value': 0.0, 'state': 'empty', 'segments': 0, 'visible_ticks': visible}
+        # 只取左侧连续充能刻度，后方孤立的发光特效不计入剩余回路。
+        value = (14.5 + 13.5 * (prefix - 1) + 3) / 546
+        return {'value': min(1.0, value), 'state': 'filled_estimated' if estimated else 'filled',
+                'segments': prefix, 'visible_ticks': visible, 'estimated': estimated}
 
     @staticmethod
     def bloom_tail_progressing(samples, elapsed):
@@ -1809,6 +2164,28 @@ class Rotation:
                    max(2.0, min(1.0, max(0.0, float(forte))) * Rotation.BLOOM_OUTPUT_TIMEOUT
                        + Rotation.BLOOM_TAIL_GRACE))
 
+    @classmethod
+    def bloom_estimate_converged(cls, estimate_since, elapsed):
+        """1.2.15 / 1.2.16：连续估算多久才降级为不可读。
+
+        1.2.14 用「连续 10 帧」表达上限，帧率一变降级时机就跟着漂；降级该由「估算持续了多久」
+        决定，而不是由采样次数决定。1.2.16 把窗口由 1.2 秒降到 0.5 秒：现场约 20 帧/秒时 1.2 秒
+        相当于 20 余帧，实测最长连续估算 23 帧仍够不到，收敛整体失效。
+        """
+        if estimate_since is None:
+            return False
+        return elapsed - estimate_since >= cls.BLOOM_FORTE_ESTIMATE_MAX_SECONDS
+
+    @classmethod
+    def bloom_estimate_progressing(cls, previous, forte):
+        """1.2.17：估算读数是否仍在真实消耗（决定要不要重开降级窗口）。
+
+        1.2.16 把窗口降到 0.5 秒后 run1 出现 estimate_fallback=62 的一段，而同段识别序列是
+        0.996 -> 0.502 -> 0.106：上界一直在跟着消耗走。这种帧被判不可读只会把真实进度抹成
+        samples=0，让判据层零输入、必然烧满预算，所以估算读数也要认下降证据。
+        """
+        return previous is not None and previous - forte >= cls.BLOOM_FORTE_ESTIMATE_DROP
+
     def bloom_output(self, char, resume=None):
         resumed = resume is not None
         started = resume['started'] if resumed else time.time()
@@ -1831,7 +2208,30 @@ class Rotation:
         tail_grace = False
         steady_completion = False
         floor_completion = False
+        floor_stall = False
         unreadable_grace = False
+        consumed_tail = False
+        consumed_stall = False
+        not_engaged = False
+        untargeted = False
+        target_unlocked_since = None
+        unlocked_frames = 0
+        target_relock_count = 0
+        target_relock_readable = 0
+        budget_guard = 0
+        boundary_confirm = False
+        boundary_marker = False
+        boundary_trend = False
+        marker_end_completion = False
+        marker_seen = False
+        ring_fallback = False
+        estimate_streak = 0
+        ring_estimate_streak = 0
+        estimate_since = None
+        estimate_last = None
+        estimate_drops = 0
+        estimate_hold = 0.0
+        estimate_fallback_frames = 0
         recheck_started = None
         progress_reset = None
         progress_reset_detail = None
@@ -1853,6 +2253,18 @@ class Rotation:
                 raise RotationTimeout('bloom state did not end: wall timeout')
             if wall - target_wait_wall >= output_budget + self.BLOOM_TAIL_GRACE:
                 raise RotationTimeout('bloom state did not end: tail grace timeout')
+
+        def guard_budget():
+            """1.2.23：阻塞调用前复核硬预算。
+
+            1.2.22 批实测 tail_extra=+0.171、1.2.17 批更出现过 +2.078：识别、补按与换帧都会阻塞，
+            硬预算原先只在帧边界复核，边界因此被推过一个调用周期。宽限窗内的复核次数记入
+            budget_guard 确证字段，为 0 说明本段预算从未耗尽。
+            """
+            nonlocal budget_guard
+            if time.monotonic() - wall_started - target_wait_wall >= output_budget:
+                budget_guard += 1
+            check_hard_budget()
 
         def check_recheck_deadline():
             recheck_expired = (recheck_started is not None
@@ -2021,7 +2433,34 @@ class Rotation:
                 elapsed = max(0.0, char.time_elapsed_accounting_for_freeze(started) - target_wait_active)
                 current_elapsed = elapsed
                 current_marker = self.task.find_one('camellya_budding', threshold=0.7)
-                current_forte = float(char.get_forte(budding=True))
+                # 1.2.12：本段是否见过开花标记。它区分「开花真打完」与「从未开环」两种零读数形态。
+                marker_seen = marker_seen or bool(current_marker)
+                reading = char.get_forte_reading(budding=True) if hasattr(char, 'get_forte_reading') else None
+                current_forte = float(reading['value']) if reading else float(char.get_forte(budding=True))
+                # 1.2.13：本段是否用过「缺失刻度按充能计入」的上界回退读数（版本确证字段）。
+                if reading and reading.get('estimated'):
+                    ring_fallback = True
+                    estimate_streak += 1
+                    ring_estimate_streak = max(ring_estimate_streak, estimate_streak)
+                    # 1.2.17：本帧估算读数仍在下降说明上界跟着真实消耗在走，降级窗口从本帧重开，
+                    # 否则连续估算超时会把这段真实进度一起抹成 samples=0。
+                    if self.bloom_estimate_progressing(estimate_last, current_forte):
+                        estimate_since = elapsed
+                        estimate_drops += 1
+                    elif estimate_since is None:
+                        estimate_since = elapsed
+                    estimate_last = current_forte
+                    estimate_hold = max(estimate_hold, elapsed - estimate_since)
+                else:
+                    estimate_streak = 0
+                    estimate_since = None
+                    estimate_last = None
+                # 1.2.14：连续估算超过上限就当作本帧读不到，交回不可读门与原超时；
+                # 否则偏高上界会长期替代精确读数，把「真没打完」伪装成「读数纹丝不动」。
+                # 1.2.15：上限按秒判定，连续帧数只作遥测；降级帧数另记 estimate_fallback 确证字段。
+                if self.bloom_estimate_converged(estimate_since, elapsed):
+                    current_forte = -1.0
+                    estimate_fallback_frames += 1
                 sampled_output_wall = time.monotonic() - wall_started - target_wait_wall
                 resource_observed = resource_observed or current_forte > self.BLOOM_ENDED_FORTE
                 # 1.2.5：基线随样本更新为本段观测峰值，consumed = 1 - forte / peak；
@@ -2036,18 +2475,125 @@ class Rotation:
                                              'previous': previous_sample, 'current': current_forte}
                 in_team, current_index, _ = self.task.in_team()
                 same_character = in_team and current_index == char.index
+                # 1.2.11：零读数未开环早退。整段连一个可读样本都没有、开花标记也不可见时，判据层没有
+                # 任何输入可判；此时继续烧预算只会白占相位时间，直接收段交回轮转。
+                # 1.2.19：只在读不到时采一次锁敌证据，避免给可读帧增加检测开销。
+                # 1.2.22：重锁计数与读数可读性解耦。1.2.21 批 run2 的 target lost 段实测
+                # output_wall=5.703、estimate_drops=6、relock=0：该段读数多数可读，旧逻辑先看
+                # 「读数可读」就清零计数，重锁门永远攒不到 3 帧，锁丢了也没人补。
+                # 1.2.19 的丢锁计时口径（target_unlocked_since）逐字不动，两套证据分开维护。
+                target_locked = bool(self.task.has_target())
+                if 0 <= current_forte <= 1:
+                    target_unlocked_since = None
+                elif target_locked:
+                    target_unlocked_since = None
+                elif target_unlocked_since is None:
+                    target_unlocked_since = elapsed
+                unlocked_frames = 0 if target_locked else unlocked_frames + 1
+                if self.bloom_output_untargeted(elapsed, target_unlocked_since,
+                                                bool(current_marker), same_character,
+                                                self.task.in_liberation, progress):
+                    outcome = 'bloom output untargeted'
+                    untargeted = True
+                    char.logger.info(f'椿散守 bloom output untargeted elapsed={elapsed:.3f} '
+                                     f'output_wall={sampled_output_wall:.3f} budget={output_budget:.3f} '
+                                     f'forte={current_forte:.3f} marker=True samples={len(progress)} '
+                                     f'unlocked_for={elapsed - target_unlocked_since:.3f}')
+                    self.capture_bloom_diagnostics(char, 'untargeted', 'output_target_unlocked')
+                    break
+                # 1.2.21：输出段丢锁后的轻量重锁。1.2.20 批 run1 的 untargeted 段 3.5 秒里
+                # check_target Release/Retry=80/85，却一次 target lost try retarget 都没打印：
+                # 锁定在输出第 1.42 秒就丢了，之后没有任何补锁动作，读数只能整段不可读。
+                # 这里只补重锁动作，等待额度仍由 BLOOM_TARGET_WAIT_MAX/TOTAL 池统一封顶。
+                if self.bloom_target_relock_allowed(unlocked_frames, target_relock_count,
+                                                    same_character, bool(current_marker),
+                                                    self.task.in_liberation):
+                    target_relock_count += 1
+                    # 1.2.22：重锁会出现在读数可读的帧上，那正是 1.2.21 漏掉的形态，单独计数供验收。
+                    reading_readable = 0 <= current_forte <= 1
+                    if reading_readable:
+                        target_relock_readable += 1
+                    char.logger.info(f'椿散守 bloom target relock count={target_relock_count} '
+                                     f'unlocked_frames={unlocked_frames} elapsed={elapsed:.3f} '
+                                     f'output_wall={sampled_output_wall:.3f} forte={current_forte:.3f} '
+                                     f'readable={reading_readable}')
+                    self.capture_bloom_diagnostics(char, 'target_relock', 'output_target_unlocked')
+                    relocked = self.task.target_enemy(wait=True,
+                                                      time_out=self.BLOOM_TARGET_RELOCK_TIMEOUT)
+                    if relocked:
+                        # 重锁成功才重置 1.2.19 的丢锁计时，让早退只在真的锁不上时成立。
+                        target_unlocked_since = None
+                        unlocked_frames = 0
+                    char.logger.info(f'椿散守 bloom target relock result count={target_relock_count} '
+                                     f'recovered={bool(relocked)} total_wait={target_wait_wall:.3f}')
+                    continue
+                if self.bloom_output_never_engaged(progress, elapsed, current_forte, same_character,
+                                                   bool(current_marker), self.task.in_liberation,
+                                                   marker_seen):
+                    outcome = 'bloom not engaged'
+                    not_engaged = True
+                    char.logger.info(f'椿散守 bloom not engaged elapsed={elapsed:.3f} '
+                                     f'output_wall={sampled_output_wall:.3f} budget={output_budget:.3f} '
+                                     f'forte={current_forte:.3f} marker=False samples={len(progress)}')
+                    self.capture_bloom_diagnostics(char, 'not_engaged', 'bloom_ring_absent')
+                    break
                 # 结束候选帧两格读数约 5.68%，三格约 8.15%；仅结束确认容忍两格，进入和停滞阈值不变。
                 # 必须仍看到当前椿、标记消失且连续两帧成立，不能单凭小回路值认定完成。
+                # 1.2.12：读数整段不可读时，标记消失是本段唯一可得的结束证据；两条并列但互斥
+                # （一条要求读数可读，一条要求读数不可读），连续两帧仍由 ended_frames 统一保证。
+                marker_end = self.bloom_marker_end_allowed(current_forte, same_character,
+                                                           bool(current_marker), marker_seen,
+                                                           self.task.in_liberation, elapsed, resumed)
                 bloom_ended = (same_character and not current_marker
                                and 0 <= current_forte <= self.BLOOM_COMPLETE_FORTE
-                               and (resumed or elapsed >= 5.1))
+                               and (resumed or elapsed >= 5.1)) or marker_end
                 check_hard_budget()
                 ended_frames = ended_frames + 1 if bloom_ended else 0
                 completed = ended_frames >= 2
                 if completed:
                     outcome = 'completed'
+                    marker_end_completion = marker_end
                     char.logger.info(f'椿散守 bloom completion confirmed elapsed={elapsed:.3f} '
                                      f'forte={current_forte:.3f} ended_frames={ended_frames} resumed={resumed}')
+                    if marker_end:
+                        char.logger.info(f'椿散守 bloom marker end completion elapsed={elapsed:.3f} '
+                                         f'output_wall={sampled_output_wall:.3f} '
+                                         f'forte={current_forte:.3f} ended_frames={ended_frames}')
+                        self.capture_bloom_diagnostics(char, 'marker_end', 'marker_gone_unreadable')
+                    break
+                # 1.2.24：越过输出软预算后接受「单帧 + 已消耗旁证」的结束确认，把两帧确认的成本
+                # 从过冲里去掉；预算内仍必须连续两帧，1.2.7–1.2.23 的全部出口与门限不动。
+                if self.bloom_boundary_confirm_allowed(current_forte, same_character,
+                                                       bool(current_marker), marker_seen,
+                                                       self.task.in_liberation, elapsed, resumed,
+                                                       tail_grace,
+                                                       sampled_output_wall, output_budget,
+                                                       progress, tail_baseline):
+                    outcome = 'completed'
+                    boundary_confirm = True
+                    # 1.2.25：区分两种放行形态，验收时能核对新门是否真的顶替了被挡住的旧通道。
+                    boundary_marker = bool(current_marker)
+                    char.logger.info(f'椿散守 bloom boundary confirm elapsed={elapsed:.3f} '
+                                     f'marker_visible={boundary_marker} '
+                                     f'output_wall={sampled_output_wall:.3f} '
+                                     f'budget={output_budget:.3f} forte={current_forte:.3f} '
+                                     f'status={self.bloom_tail_status(progress, sampled_output_wall, tail_baseline)}')
+                    self.capture_bloom_diagnostics(char, 'boundary_confirm', 'single_frame_after_budget')
+                    break
+                # 1.2.26：边界后读数仍在单调下降时按完成收尾。1.2.25 批 +0.406 那朵在 8.000 时
+                # forte=0.156、decreases=13、drop_total=0.247，读数掉到 0.057 才被 1.2.25 接住，
+                # 过冲全部花在这段真实下降里；本门只认明显下降且已消耗 >=90% 的形态。
+                if self.bloom_boundary_trend_allowed(current_forte, same_character, marker_seen,
+                                                     self.task.in_liberation, elapsed, resumed,
+                                                     tail_grace, sampled_output_wall,
+                                                     output_budget, progress, tail_baseline):
+                    outcome = 'completed'
+                    boundary_trend = True
+                    char.logger.info(f'椿散守 bloom boundary trend completion elapsed={elapsed:.3f} '
+                                     f'output_wall={sampled_output_wall:.3f} '
+                                     f'budget={output_budget:.3f} forte={current_forte:.3f} '
+                                     f'status={self.bloom_tail_status(progress, sampled_output_wall, tail_baseline)}')
+                    self.capture_bloom_diagnostics(char, 'boundary_trend', 'still_decreasing_after_budget')
                     break
                 # 1.2.7：输出预算耗尽后先看中高位稳态完成判定，避免「已经打完、只是读数冻结」被
                 # 软预算改写成 output timeout；判据只在预算边界之后可用，不提前截断真实输出。
@@ -2077,6 +2623,22 @@ class Rotation:
                                      f'status={floor_status}')
                     self.capture_bloom_diagnostics(char, 'floor_completion', 'three_grid_floor')
                     break
+                # 1.2.18：贴地三格仍在 progressing 的停滞出口。1.2.17 run2 实测 forte=0.082、
+                # steady_range=0.0、steady_hold=0.485、consumed_ratio=0.918，1.2.8 地板出口被 reason
+                # 与 steady_hold>=1.0 双重挡住，只能烧满宽限抛 tail grace timeout。
+                if self.bloom_floor_stall_allowed(progress, sampled_output_wall, output_budget,
+                                                  current_forte, observation['retries'], same_character,
+                                                  bool(current_marker), self.task.in_liberation,
+                                                  tail_baseline):
+                    outcome = 'completed'
+                    floor_stall = True
+                    stall_status = self.bloom_tail_status(progress, sampled_output_wall, tail_baseline)
+                    char.logger.info(f'椿散守 bloom floor stall completion elapsed={elapsed:.3f} '
+                                     f'output_wall={sampled_output_wall:.3f} budget={output_budget:.3f} '
+                                     f'forte={current_forte:.3f} heavy_retries={observation["retries"]} '
+                                     f'status={stall_status}')
+                    self.capture_bloom_diagnostics(char, 'floor_stall', 'floor_progressing_stall')
+                    break
                 # 1.2.9：预算边界读数断流出口。必须排在 check_recheck_deadline() 之前：9.000 段就是
                 # 8.562 起不可读、0.4 秒复核到期被判 tail progress lost，判据再准也来不及上场。
                 if self.bloom_unreadable_grace_allowed(progress, sampled_output_wall, output_budget,
@@ -2092,26 +2654,66 @@ class Rotation:
                                      f'heavy_retries={observation["retries"]} status={grace_status}')
                     self.capture_bloom_diagnostics(char, 'unreadable_grace', 'boundary_read_blackout')
                     break
+                # 1.2.10：已消耗稳态尾段出口。8.000 那段的 reason 是 insufficient_decreases（0.279 <=0.25），
+                # 地板窗与 outside_tail 门都接不住；同样排在复核到期之前，否则会被判成 tail progress lost。
+                if self.bloom_consumed_tail_allowed(progress, sampled_output_wall, output_budget,
+                                                    current_forte, same_character,
+                                                    bool(current_marker), self.task.in_liberation,
+                                                    tail_baseline):
+                    outcome = 'completed'
+                    consumed_tail = True
+                    consumed_status = self.bloom_tail_status(progress, sampled_output_wall, tail_baseline)
+                    char.logger.info(f'椿散守 bloom consumed tail completion elapsed={elapsed:.3f} '
+                                     f'output_wall={sampled_output_wall:.3f} budget={output_budget:.3f} '
+                                     f'forte={current_forte:.3f} '
+                                     f'heavy_retries={observation["retries"]} status={consumed_status}')
+                    self.capture_bloom_diagnostics(char, 'consumed_tail', 'stalled_after_consumption')
+                    break
+                # 1.2.20：已消耗尾段被一次上跳重置平窗时的出口。1.2.19 run1 实测 output_wall=8.000、
+                # forte=0.279、steady_range=0.0、steady_hold=0.61、steady_flat=False、drop_total=0.025、
+                # consumed_ratio=0.72、history_reset=forte_rise；1.2.10 要求 steady_hold>=1.0 与
+                # steady_flat=True，边界前平窗攒不满，只能烧满预算判 output timeout。
+                if self.bloom_consumed_tail_stall_allowed(progress, sampled_output_wall, output_budget,
+                                                         current_forte, observation['retries'],
+                                                         same_character, bool(current_marker),
+                                                         self.task.in_liberation, tail_baseline):
+                    outcome = 'completed'
+                    consumed_stall = True
+                    consumed_stall_status = self.bloom_tail_status(progress, sampled_output_wall,
+                                                                  tail_baseline)
+                    char.logger.info(f'椿散守 bloom consumed tail stall completion elapsed={elapsed:.3f} '
+                                     f'output_wall={sampled_output_wall:.3f} budget={output_budget:.3f} '
+                                     f'forte={current_forte:.3f} '
+                                     f'heavy_retries={observation["retries"]} '
+                                     f'status={consumed_stall_status}')
+                    self.capture_bloom_diagnostics(char, 'consumed_stall', 'consumed_tail_flat_stall')
+                    break
                 # 软复核到期后只接受已经取得的结束证据，不再等待或发送输入；硬预算仍在最前。
                 check_recheck_deadline()
                 check_budget()
                 sampled_wait_count = wait_count
                 executor = self.task.__dict__.get('_executor')
                 sampled_frame = getattr(executor, 'frame', None)
+                # 1.2.23：这四个调用都会阻塞（识别、补按、换帧），各自的复核点前移到调用之前，
+                # 避免 8+2 秒边界只能在下一次帧边界才发现（1.2.17 批 tail_extra=+2.078）。
+                guard_budget()
                 char.check_combat()
                 frame_changed = executor is not None and sampled_frame is not executor.frame
                 if sampled_wait_count != wait_count or frame_changed:
                     continue
                 check_budget()
+                guard_budget()
                 char.check_target(True)
                 frame_changed = executor is not None and sampled_frame is not executor.frame
                 if sampled_wait_count != wait_count or frame_changed:
                     continue
                 check_budget()
+                guard_budget()
                 self.maintain_bloom_heavy(char, observation, elapsed, forte=current_forte,
                                           bloom_visible=same_character and bool(current_marker)
                                                         and not self.task.in_liberation,
                                           check_budget=check_budget)
+                guard_budget()
                 self.task.next_frame()
         except RotationTimeout as error:
             outcome = str(error)
@@ -2134,14 +2736,28 @@ class Rotation:
             char.logger.info(f'椿散守 bloom timing outcome={outcome} wall={wall:.3f} '
                              f'output={elapsed:.3f} output_wall={max(0.0, wall - target_wait_wall):.3f} '
                              f'target_wait={target_wait_wall:.3f} wait_count={wait_count} '
+                             f'relock={target_relock_count} '
+                             f'relock_readable={target_relock_readable} '
+                             f'budget_guard={budget_guard} '
+                             f'boundary_confirm={boundary_confirm} '
+                             f'boundary_marker={boundary_marker} '
+                             f'boundary_trend={boundary_trend} '
                              f'heavy_retries={observation["retries"]} tail_grace={tail_grace} '
-                             f'steady={steady_completion} floor={floor_completion} '
+                             f'steady={steady_completion} floor={floor_completion} floor_stall={floor_stall} '
                              f'unreadable_grace={unreadable_grace} '
+                             f'consumed_tail={consumed_tail} consumed_stall={consumed_stall} '
+                             f'not_engaged={not_engaged} untargeted={untargeted} '
+                             f'marker_end={marker_end_completion} '
+                             f'ring_fallback={ring_fallback} '
+                             f'ring_estimate_streak={ring_estimate_streak} '
+                             f'estimate_fallback={estimate_fallback_frames} '
+                             f'estimate_hold={estimate_hold:.3f} '
+                             f'estimate_drops={estimate_drops} '
                              f'tail_extra={max(0.0, wall - target_wait_wall - output_budget):.3f} '
                              f'resumed={resumed} resume_forte={resume_forte:.3f} '
                              f'output_budget={output_budget:.3f} ended_frames={ended_frames}')
 
-PACKAGE_ID = 'chunsanshou-v1.2.9-bloom-unreadable-grace'
+PACKAGE_ID = 'chunsanshou-v1.2.26-bloom-boundary-trend'
 
 
 class TeamMember:
@@ -2217,3 +2833,15 @@ class Camellya(TeamMember, BuiltinCamellya):
                 return CamellyaTeamVision.budding_forte(self)['value']
             return CamellyaTeamVision.forte(self)['value']
         return super().get_forte(budding)
+
+    def get_forte_reading(self, budding=False):
+        """1.2.13：返回带 state/estimated 的完整读数。
+
+        get_forte 只给数值，收尾判据无从知道这一帧是「精确读数」还是「缺失刻度估算的上界」。
+        开花段用本方法拿全量读数，才能把 ring_fallback 确证字段与上界语义一并带进日志。
+        """
+        if self._team_members_match():
+            if budding:
+                return CamellyaTeamVision.budding_forte(self)
+            return CamellyaTeamVision.forte(self)
+        return None

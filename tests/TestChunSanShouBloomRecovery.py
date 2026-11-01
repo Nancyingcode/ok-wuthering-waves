@@ -721,6 +721,764 @@ class TestChunSanShouBloomRecovery(unittest.TestCase):
         self.assertIn('floor=False', logs[-1])
         self.assertTrue(any('bloom unreadable grace completion' in line for line in logs))
 
+    @staticmethod
+    def consumed_tail_samples():
+        # 1.2.10 实测 8.000 段原文：6.641 起读数稳定停在 0.279，13 个样本、span=1.437、decreases=0。
+        return [(6.641 + step * 0.1, 0.279) for step in range(13)]
+
+    def test_consumed_tail_finishes_stalled_after_full_consumption(self):
+        # consumed_ratio=0.697、samples=13、sample_age=0.0、steady_flat=True、steady_hold=1.437，
+        # 该段 heavy_retries=0 —— 补按门不能作为前提，否则唯一实测形态会被自己拒掉。
+        samples = self.consumed_tail_samples()
+        status = Rotation.bloom_tail_status(samples, 8.0, 0.92)
+        self.assertEqual(status['reason'], 'insufficient_decreases')
+        self.assertAlmostEqual(status['consumed_ratio'], 0.697)
+        self.assertEqual(status['decreases'], 0)
+        self.assertTrue(Rotation.bloom_consumed_tail_allowed(
+            samples, 8.0, 8.0, 0.279, True, True, False, 0.92))
+
+    def test_consumed_tail_rejects_unfinished_and_partial_consumption(self):
+        # 0.823 / 0.700 两条 outside_tail 是真实未打完（消耗 10.7% / 26.3%），必须仍判超时。
+        self.assertFalse(Rotation.bloom_consumed_tail_allowed(
+            [(6.5 + step * 0.075, 0.823) for step in range(20)], 8.0, 8.0, 0.823, True, True, False, 0.92))
+        self.assertFalse(Rotation.bloom_consumed_tail_allowed(
+            [(6.5 + step * 0.075, 0.700) for step in range(20)], 8.0, 8.0, 0.700, True, True, False, 0.95))
+        samples = self.consumed_tail_samples()
+        # 基线过低（0.34，只消耗 17.9%）与峰值不可读（-1）都不放行。
+        self.assertFalse(Rotation.bloom_consumed_tail_allowed(
+            samples, 8.0, 8.0, 0.279, True, True, False, 0.34))
+        self.assertFalse(Rotation.bloom_consumed_tail_allowed(
+            samples, 8.0, 8.0, 0.279, True, True, False))
+
+    def test_consumed_tail_rejects_each_gate(self):
+        samples = self.consumed_tail_samples()
+
+        def allowed(**overrides):
+            params = dict(samples=samples, output_wall=8.0, output_budget=8.0, forte=0.279,
+                          same_character=True, marker_visible=True, in_liberation=False,
+                          baseline=0.92)
+            params.update(overrides)
+            return Rotation.bloom_consumed_tail_allowed(
+                params['samples'], params['output_wall'], params['output_budget'], params['forte'],
+                params['same_character'], params['marker_visible'], params['in_liberation'],
+                params['baseline'])
+
+        self.assertTrue(allowed())
+        # 预算未耗尽 / 本帧不可读 / 标记消失 / 不在场 / 解放态。
+        self.assertFalse(allowed(output_wall=7.9))
+        self.assertFalse(allowed(forte=-1.0))
+        self.assertFalse(allowed(marker_visible=False))
+        self.assertFalse(allowed(same_character=False))
+        self.assertFalse(allowed(in_liberation=True))
+        # 尾部样本过期（sample_age=0.759）只判 stale_sample，不接手。
+        self.assertFalse(allowed(samples=samples[:-6]))
+        # 只剩两个样本时只能判 insufficient_samples。
+        self.assertFalse(allowed(samples=samples[-2:]))
+
+    def test_consumed_tail_end_to_end_marks_timing_flag(self):
+        # 端到端：回路从 0.92 消耗到 0.279 后纹丝不动、开花标记仍在屏，8 秒边界必须按已消耗稳态收尾，
+        # 不再以 insufficient_decreases 超时；bloom timing 行须带 consumed_tail=True。
+        # 平台值取 0.20（七格）：<=0.25 让尾段判 insufficient_decreases，1.2.7 中高位出口要求
+        # outside_tail、1.2.8 地板窗要求 <=0.10、1.2.6 贴零要求 <=0.05，四条都接不住，只有本出口能收。
+        # 0.279 那一档不能用来做端到端：1.2.7 调用 bloom_tail_status 时不带基线，forte>0.25 一律判
+        # outside_tail，只要 retries>=2 就会先收走（实测该段 heavy_retries=0 才轮到本出口）。
+        def forte(**kwargs):
+            at = self.clock[0] - 100
+            return max(0.20, 0.92 - at * 0.35)
+
+        self.char.get_forte.side_effect = forte
+        with patch.object(self.char, 'logger') as logger:
+            self.rotation.bloom_output(self.char)
+        logs = [entry.args[0] for entry in logger.info.call_args_list]
+        self.assertIn('outcome=completed', logs[-1])
+        self.assertIn('consumed_tail=True', logs[-1])
+        # steady=True 说明被 1.2.7 抢先收尾：本条出口一次没上场，等于没测到。
+        self.assertIn('steady=False', logs[-1])
+        self.assertTrue(any('bloom consumed tail completion' in line for line in logs))
+
+    def test_consumed_tail_keeps_hard_limits_untouched(self):
+        # 1.2.10 只加一条出口：八个硬约束常量、两个结束阈值与 1.2.6–1.2.9 门限逐字不动。
+        self.assertEqual(self.rotation.BLOOM_TAIL_CONSUMED_SPAN, 1.0)
+        self.assertEqual(self.rotation.BLOOM_TAIL_CONSUMED_RATIO, 0.65)
+        self.assertEqual(self.rotation.BLOOM_OUTPUT_TIMEOUT, 8)
+        self.assertEqual(self.rotation.BLOOM_WALL_TIMEOUT, 16)
+        self.assertEqual(self.rotation.PHASE_TIMEOUT, 24)
+        self.assertEqual(self.rotation.BLOOM_TAIL_GRACE, 2)
+        self.assertEqual(self.rotation.BLOOM_TAIL_RECHECK, 0.4)
+        self.assertEqual(self.rotation.BLOOM_FEEDBACK_TIMEOUT, 1.2)
+        self.assertEqual(self.rotation.BLOOM_TARGET_WAIT_MAX, 2.0)
+        self.assertEqual(self.rotation.BLOOM_TARGET_WAIT_TOTAL, 3.0)
+        self.assertEqual(self.rotation.BLOOM_COMPLETE_FORTE, 0.06)
+        self.assertEqual(self.rotation.BLOOM_ENDED_FORTE, 0.05)
+        self.assertEqual(self.rotation.BLOOM_TAIL_FLOOR_MAX, 0.10)
+        self.assertEqual(self.rotation.BLOOM_TAIL_UNREADABLE_MAX_AGE, 1.0)
+
+    def test_not_engaged_aborts_when_bloom_ring_never_appears(self):
+        # 1.2.10 两轮两次未收尾：cast confirmed 后整段 8 秒零可读样本、history=[]、重击 0，
+        # 同帧识别遥测是 no_bloom_ring / legacy_red_percent=0.000000 / 开花标记不可见。
+        self.assertTrue(Rotation.bloom_output_never_engaged([], 2.5, -1.0, True, False, False))
+
+    def test_not_engaged_rejects_readable_visible_or_early_frames(self):
+        # 只早退「整段零读数且标记不可见」这一种：可读帧、标记可见、解放态、不在场、样本未空、
+        # 以及 2 秒之前一律不早退（避免把 lag 或首帧抖动当成未开环）。
+        self.assertFalse(Rotation.bloom_output_never_engaged([], 1.9, -1.0, True, False, False))
+        self.assertFalse(Rotation.bloom_output_never_engaged([], 2.5, 0.922, True, False, False))
+        self.assertFalse(Rotation.bloom_output_never_engaged([], 2.5, -1.0, True, True, False))
+        self.assertFalse(Rotation.bloom_output_never_engaged([], 2.5, -1.0, True, False, True))
+        self.assertFalse(Rotation.bloom_output_never_engaged([], 2.5, -1.0, False, False, False))
+        self.assertFalse(Rotation.bloom_output_never_engaged([(0.5, 0.92)], 2.5, -1.0, True, False, False))
+
+    def test_not_engaged_end_to_end_stops_before_output_budget(self):
+        # 端到端：整段零可读且开花标记不可见；必须早退、不得烧满 8 秒，bloom timing 行带 not_engaged=True。
+        self.task.find_one = Mock(return_value=False)
+        with patch.object(self.char, 'logger') as logger:
+            self.rotation.bloom_output(self.char)
+        logs = [entry.args[0] for entry in logger.info.call_args_list]
+        self.assertIn('outcome=bloom not engaged', logs[-1])
+        self.assertIn('not_engaged=True', logs[-1])
+        self.assertTrue(any('bloom not engaged' in line for line in logs))
+        wall = float(logs[-1].split('wall=')[1].split()[0])
+        self.assertLess(wall, self.rotation.BLOOM_OUTPUT_TIMEOUT)
+
+    def test_not_engaged_keeps_hard_limits_untouched(self):
+        # 1.2.11 只加早退：八个硬约束常量、两个结束阈值与 1.2.6–1.2.10 门限逐字不动。
+        self.assertEqual(self.rotation.BLOOM_NOT_ENGAGED_AFTER, 2.0)
+        self.assertEqual(self.rotation.BLOOM_OUTPUT_TIMEOUT, 8)
+        self.assertEqual(self.rotation.BLOOM_WALL_TIMEOUT, 16)
+        self.assertEqual(self.rotation.PHASE_TIMEOUT, 24)
+        self.assertEqual(self.rotation.BLOOM_TAIL_GRACE, 2)
+        self.assertEqual(self.rotation.BLOOM_TAIL_RECHECK, 0.4)
+        self.assertEqual(self.rotation.BLOOM_FEEDBACK_TIMEOUT, 1.2)
+        self.assertEqual(self.rotation.BLOOM_TARGET_WAIT_MAX, 2.0)
+        self.assertEqual(self.rotation.BLOOM_TARGET_WAIT_TOTAL, 3.0)
+        self.assertEqual(self.rotation.BLOOM_COMPLETE_FORTE, 0.06)
+        self.assertEqual(self.rotation.BLOOM_ENDED_FORTE, 0.05)
+        self.assertEqual(self.rotation.BLOOM_TAIL_FLOOR_MAX, 0.10)
+        self.assertEqual(self.rotation.BLOOM_TAIL_UNREADABLE_MAX_AGE, 1.0)
+        self.assertEqual(self.rotation.BLOOM_TAIL_CONSUMED_SPAN, 1.0)
+
+    def test_marker_end_takes_marker_gone_only_when_readings_unreadable(self):
+        # 1.2.12：读数不可读时，本段见过标记之后标记消失就是结束证据；可读形态一律走原阈值。
+        self.assertTrue(Rotation.bloom_marker_end_allowed(-1.0, True, False, True, False, 6.5, False))
+        # 标记仍可见 / 本段从未见过标记 / 同帧可读 / 解放态 / 不在场 / 5.1 秒之前一律不认。
+        self.assertFalse(Rotation.bloom_marker_end_allowed(-1.0, True, True, True, False, 6.5, False))
+        self.assertFalse(Rotation.bloom_marker_end_allowed(-1.0, True, False, False, False, 6.5, False))
+        self.assertFalse(Rotation.bloom_marker_end_allowed(0.156, True, False, True, False, 6.5, False))
+        self.assertFalse(Rotation.bloom_marker_end_allowed(-1.0, True, False, True, True, 6.5, False))
+        self.assertFalse(Rotation.bloom_marker_end_allowed(-1.0, False, False, True, False, 6.5, False))
+        self.assertFalse(Rotation.bloom_marker_end_allowed(-1.0, True, False, True, False, 4.0, False))
+        # resumed 段不受 5.1 秒限制，与 bloom_ended 的 resumed 分支一致。
+        self.assertTrue(Rotation.bloom_marker_end_allowed(-1.0, True, False, True, False, 4.0, True))
+
+    def test_not_engaged_ignores_sessions_that_already_saw_the_marker(self):
+        # 1.2.12：见过标记后再消失属于「开花结束」，交给标记结束确认，不再当作没开环早退。
+        self.assertTrue(Rotation.bloom_output_never_engaged([], 2.5, -1.0, True, False, False))
+        self.assertFalse(Rotation.bloom_output_never_engaged([], 2.5, -1.0, True, False, False, True))
+
+    def test_marker_end_completes_unreadable_bloom_after_marker_gone(self):
+        # 端到端：回路整段读不出来，标记先可见后消失；必须按完成收尾（marker_end=True），
+        # 不得烧满 8 秒超时，也不得走 1.2.11 的未开环早退。
+        def find_one(name, threshold=None, **kwargs):
+            return (self.clock[0] - 100) < 6.0
+
+        self.task.find_one = Mock(side_effect=find_one)
+        with patch.object(self.char, 'logger') as logger:
+            self.rotation.bloom_output(self.char)
+        logs = [entry.args[0] for entry in logger.info.call_args_list]
+        self.assertIn('outcome=completed', logs[-1])
+        self.assertIn('marker_end=True', logs[-1])
+        self.assertIn('not_engaged=False', logs[-1])
+        self.assertTrue(any('bloom marker end completion' in line for line in logs))
+
+    def test_marker_end_keeps_hard_limits_and_thresholds_untouched(self):
+        # 1.2.12 只加结束确认：两个结束阈值、八个硬约束常量与 1.2.6–1.2.11 门限逐字不动。
+        self.assertEqual(self.rotation.BLOOM_COMPLETE_FORTE, 0.06)
+        self.assertEqual(self.rotation.BLOOM_ENDED_FORTE, 0.05)
+        self.assertEqual(self.rotation.BLOOM_OUTPUT_TIMEOUT, 8)
+        self.assertEqual(self.rotation.BLOOM_WALL_TIMEOUT, 16)
+        self.assertEqual(self.rotation.PHASE_TIMEOUT, 24)
+        self.assertEqual(self.rotation.BLOOM_TAIL_GRACE, 2)
+        self.assertEqual(self.rotation.BLOOM_TAIL_RECHECK, 0.4)
+        self.assertEqual(self.rotation.BLOOM_FEEDBACK_TIMEOUT, 1.2)
+        self.assertEqual(self.rotation.BLOOM_TARGET_WAIT_MAX, 2.0)
+        self.assertEqual(self.rotation.BLOOM_TARGET_WAIT_TOTAL, 3.0)
+        self.assertEqual(self.rotation.BLOOM_TAIL_FLOOR_MAX, 0.10)
+        self.assertEqual(self.rotation.BLOOM_TAIL_UNREADABLE_MAX_AGE, 1.0)
+        self.assertEqual(self.rotation.BLOOM_TAIL_CONSUMED_SPAN, 1.0)
+        self.assertEqual(self.rotation.BLOOM_NOT_ENGAGED_AFTER, 2.0)
+
+    @staticmethod
+    def tick_observations(filled_ticks=20, total=40):
+        # 每个元素是 (刻度可读, 该格是否充能)；左起连续充能，与真实回路环一致。
+        return [(True, index < filled_ticks) for index in range(total)]
+
+    def test_ring_estimate_recovers_readings_when_one_tick_blinks(self):
+        # 1.2.13 实测形态：visible_ticks=39/40 已过高可见度门限，却因充能段中间一格读不到
+        # 就整帧判 unknown，8 秒窗口攒不到样本，最终兜成 output timeout。
+        exact = Rotation.budding_forte_from_observations(self.tick_observations())
+        self.assertEqual(exact['state'], 'filled')
+        self.assertFalse(exact['estimated'])
+        self.assertEqual(exact['segments'], 20)
+        self.assertEqual(exact['visible_ticks'], 40)
+        blinked = self.tick_observations()
+        blinked[5] = (False, False)
+        recovered = Rotation.budding_forte_from_observations(blinked)
+        self.assertEqual(recovered['state'], 'filled_estimated')
+        self.assertTrue(recovered['estimated'])
+        self.assertEqual(recovered['visible_ticks'], 39)
+        # 缺失格按「仍充能」计入，得到的是上界读数：只会让「已打完」更难成立。
+        self.assertGreaterEqual(recovered['value'], exact['value'])
+        # 缺失发生在充能段之后（首个未充能格右侧）时与剩余量无关，不标记为估算。
+        late = self.tick_observations()
+        late[25] = (False, False)
+        tail_missing = Rotation.budding_forte_from_observations(late)
+        self.assertEqual(tail_missing['state'], 'filled')
+        self.assertFalse(tail_missing['estimated'])
+        # 全部可见但一格都没充能：仍是明确空回路，不是不可读。
+        empty = Rotation.budding_forte_from_observations(self.tick_observations(filled_ticks=0))
+        self.assertEqual(empty['value'], 0.0)
+        self.assertEqual(empty['state'], 'empty')
+
+    def test_ring_estimate_stays_unknown_without_enough_ticks(self):
+        # 刻度根本不可见时不估算，与 1.2.13 之前的整帧 unknown 行为一致。
+        blank = [(False, False)] * 40
+        self.assertEqual(Rotation.budding_forte_from_observations(blank)['value'], -1.0)
+        # 可见度 31 低于 BLOOM_FORTE_FALLBACK_MIN_VISIBLE=34：不足以估算。
+        sparse = self.tick_observations()
+        sparse[3] = (False, False)
+        for index in range(32, 40):
+            sparse[index] = (False, False)
+        self.assertEqual(Rotation.budding_forte_from_observations(sparse)['value'], -1.0)
+        # 可见度 35 够高，但充能段连续缺 5 格超过 BLOOM_FORTE_MISSING_TOLERANCE=2。
+        crowded = self.tick_observations()
+        for index in range(3, 8):
+            crowded[index] = (False, False)
+        self.assertEqual(Rotation.budding_forte_from_observations(crowded)['value'], -1.0)
+
+    def test_ring_estimate_keeps_hard_limits_and_thresholds_untouched(self):
+        # 1.2.13 只动识别容差：两个结束阈值、八个硬约束常量与 1.2.6–1.2.12 门限逐字不动。
+        self.assertEqual(self.rotation.BLOOM_FORTE_MIN_VISIBLE, 28)
+        self.assertEqual(self.rotation.BLOOM_FORTE_FALLBACK_MIN_VISIBLE, 34)
+        self.assertEqual(self.rotation.BLOOM_FORTE_MISSING_TOLERANCE, 2)
+        self.assertEqual(self.rotation.BLOOM_COMPLETE_FORTE, 0.06)
+        self.assertEqual(self.rotation.BLOOM_ENDED_FORTE, 0.05)
+        self.assertEqual(self.rotation.BLOOM_OUTPUT_TIMEOUT, 8)
+        self.assertEqual(self.rotation.BLOOM_WALL_TIMEOUT, 16)
+        self.assertEqual(self.rotation.PHASE_TIMEOUT, 24)
+        self.assertEqual(self.rotation.BLOOM_TAIL_GRACE, 2)
+        self.assertEqual(self.rotation.BLOOM_TAIL_RECHECK, 0.4)
+        self.assertEqual(self.rotation.BLOOM_FEEDBACK_TIMEOUT, 1.2)
+        self.assertEqual(self.rotation.BLOOM_TARGET_WAIT_MAX, 2.0)
+        self.assertEqual(self.rotation.BLOOM_TARGET_WAIT_TOTAL, 3.0)
+        self.assertEqual(self.rotation.BLOOM_TAIL_FLOOR_MAX, 0.10)
+        self.assertEqual(self.rotation.BLOOM_TAIL_UNREADABLE_MAX_AGE, 1.0)
+        self.assertEqual(self.rotation.BLOOM_TAIL_CONSUMED_SPAN, 1.0)
+        self.assertEqual(self.rotation.BLOOM_NOT_ENGAGED_AFTER, 2.0)
+
+    def test_estimate_streak_drops_upper_bound_after_limit(self):
+        # 1.2.14：整段每次采样都只拿到估算上界（实测 0.996 / 0.799 长期不动）时，超过上限就把
+        # 本帧按读不到处理，交回不可读门与原超时，不让上界长期替代精确读数。
+        self.assertEqual(self.rotation.BLOOM_FORTE_ESTIMATE_MAX_SECONDS, 0.5)
+        self.char.get_forte_reading = Mock(return_value={
+            'value': 0.996, 'state': 'filled_estimated', 'estimated': True,
+            'segments': 39, 'visible_ticks': 39})
+        with patch.object(self.char, 'logger') as logger:
+            with self.assertRaises(RotationTimeout):
+                self.rotation.bloom_output(self.char)
+        logs = [entry.args[0] for entry in logger.info.call_args_list]
+        self.assertIn('ring_fallback=True', logs[-1])
+        self.assertIn('ring_estimate_streak=', logs[-1])
+        self.assertIn('estimate_fallback=', logs[-1])
+        self.assertIn('estimate_hold=', logs[-1])
+        self.assertIn('outcome=bloom state did not end: output timeout', logs[-1])
+        self.assertIn('consumed_tail=False', logs[-1])
+        # 1.2.15：确证字段是「秒级窗口下实际降级的帧数」，必须 >0，否则说明收敛没生效。
+        fallback = int(logs[-1].split('estimate_fallback=')[1].split()[0])
+        self.assertGreater(fallback, 0)
+        streak = int(logs[-1].split('ring_estimate_streak=')[1].split()[0])
+        self.assertGreater(streak, 0)
+
+    def test_estimate_streak_resets_on_exact_reading(self):
+        # 精确读数即归零：可见刻度齐全时估算不得累积，ring_estimate_streak 保持 0。
+        self.char.get_forte_reading = Mock(return_value={
+            'value': 0.95, 'state': 'filled', 'estimated': False,
+            'segments': 39, 'visible_ticks': 40})
+        # 读数恒为 0.95 精确值：整段既不消耗也不收尾，8 秒预算耗尽必然抛超时；
+        # 本用例只验估算计数不累积，异常路径的 timing 行同样由 finally 落盘。
+        with patch.object(self.char, 'logger') as logger:
+            with self.assertRaises(RotationTimeout):
+                self.rotation.bloom_output(self.char)
+        logs = [entry.args[0] for entry in logger.info.call_args_list]
+        self.assertIn('ring_estimate_streak=0', logs[-1])
+        self.assertIn('ring_fallback=False', logs[-1])
+        self.assertEqual(self.rotation.BLOOM_FORTE_ESTIMATE_MAX_SECONDS, 0.5)
+        self.assertEqual(self.rotation.BLOOM_FORTE_MIN_VISIBLE, 28)
+        self.assertEqual(self.rotation.BLOOM_FORTE_FALLBACK_MIN_VISIBLE, 34)
+        self.assertEqual(self.rotation.BLOOM_FORTE_MISSING_TOLERANCE, 2)
+        self.assertEqual(self.rotation.BLOOM_COMPLETE_FORTE, 0.06)
+        self.assertEqual(self.rotation.BLOOM_ENDED_FORTE, 0.05)
+        self.assertEqual(self.rotation.BLOOM_OUTPUT_TIMEOUT, 8)
+        self.assertEqual(self.rotation.BLOOM_WALL_TIMEOUT, 16)
+        self.assertEqual(self.rotation.PHASE_TIMEOUT, 24)
+        self.assertEqual(self.rotation.BLOOM_TAIL_GRACE, 2)
+        self.assertEqual(self.rotation.BLOOM_TAIL_RECHECK, 0.4)
+        self.assertEqual(self.rotation.BLOOM_FEEDBACK_TIMEOUT, 1.2)
+        self.assertEqual(self.rotation.BLOOM_TARGET_WAIT_MAX, 2.0)
+        self.assertEqual(self.rotation.BLOOM_TARGET_WAIT_TOTAL, 3.0)
+        self.assertEqual(self.rotation.BLOOM_TAIL_FLOOR_MAX, 0.10)
+        self.assertEqual(self.rotation.BLOOM_TAIL_UNREADABLE_MAX_AGE, 1.0)
+        self.assertEqual(self.rotation.BLOOM_TAIL_CONSUMED_SPAN, 1.0)
+        self.assertEqual(self.rotation.BLOOM_NOT_ENGAGED_AFTER, 2.0)
+
+
+    def test_estimate_convergence_window_is_reachable_at_observed_frame_rate(self):
+        # 1.2.16：run 0588d04d 的 8 段开花里估算连续帧数最高 23 帧、estimate_fallback 全为 0，说明
+        # 23 帧累计不足 1.2 秒（帧间隔 < 0.052 秒，约 19 帧/秒以上），1.2.15 的窗口在现场不可达。
+        # 窗口降到 0.5 秒，等于恢复 1.2.14 已验证会触发的时机，同时保留按秒判定、不随帧率漂移。
+        self.assertEqual(self.rotation.BLOOM_FORTE_ESTIMATE_MAX_SECONDS, 0.5)
+        self.assertFalse(self.rotation.bloom_estimate_converged(None, 10.0))
+        self.assertFalse(self.rotation.bloom_estimate_converged(10.0, 10.3))
+        self.assertTrue(self.rotation.bloom_estimate_converged(10.0, 10.5))
+        self.assertTrue(self.rotation.bloom_estimate_converged(10.0, 12.0))
+
+    def test_estimate_convergence_keeps_dropping_upper_bound_alive(self):
+        # 1.2.17：1.2.16 run1 的 estimate_fallback=62 段里，估算读数一路 0.996 -> 0.502 -> 0.106，
+        # 上界仍跟着消耗在走；这种帧不许降级，否则真实进度会被抹成 samples=0。
+        self.assertEqual(self.rotation.BLOOM_FORTE_ESTIMATE_DROP, 0.015)
+        self.assertFalse(self.rotation.bloom_estimate_progressing(None, 0.996))
+        self.assertFalse(self.rotation.bloom_estimate_progressing(0.996, 0.99))
+        self.assertTrue(self.rotation.bloom_estimate_progressing(0.996, 0.502))
+        self.assertTrue(self.rotation.bloom_estimate_progressing(0.502, 0.106))
+        self.assertFalse(self.rotation.bloom_estimate_progressing(0.106, 0.106))
+
+    def test_floor_stall_takes_flat_floor_reading_still_reported_as_progressing(self):
+        # 1.2.18：1.2.17 run2 实测 forte=0.082、steady_range=0.0、steady_hold=0.485、consumed_ratio=0.918、
+        # drop_age=0.657，尾段 reason 因此落在 progressing；1.2.8 地板出口要求 reason 为
+        # stale_decrease/insufficient_decreases 且 steady_hold >= 1.0，这条被双重挡住后只能烧满宽限。
+        samples = [(9.0, 0.996), (9.25, 0.109), (9.3, 0.082)]
+        samples += [(9.3 + index * 0.05, 0.082) for index in range(1, 10)]
+        status = Rotation.bloom_tail_status(samples, 9.75, 0.996)
+        self.assertEqual(status['reason'], 'progressing')
+        self.assertAlmostEqual(status['consumed_ratio'], 0.918, places=3)
+        self.assertEqual(status['steady_range'], 0.0)
+        self.assertGreaterEqual(status['steady_hold'], 0.4)
+        self.assertTrue(Rotation.bloom_floor_stall_allowed(
+            samples, 9.75, 8.0, 0.082, 2, True, True, False, 0.996))
+
+    def test_floor_stall_rejects_moving_or_non_floor_readings(self):
+        # 反例护栏：补按未用尽、读数不在地板窗、尾部仍在变动、消耗不足时一律交回原判据。
+        samples = [(9.0, 0.996), (9.25, 0.109), (9.3, 0.082)]
+        samples += [(9.3 + index * 0.05, 0.082) for index in range(1, 10)]
+        self.assertFalse(Rotation.bloom_floor_stall_allowed(
+            samples, 9.75, 8.0, 0.082, 1, True, True, False, 0.996))
+        self.assertFalse(Rotation.bloom_floor_stall_allowed(
+            samples, 9.75, 8.0, 0.12, 2, True, True, False, 0.996))
+        # 消耗不足：峰值 0.12 只消耗 31.7%，不满足 >=65%。
+        self.assertFalse(Rotation.bloom_floor_stall_allowed(
+            samples, 9.75, 8.0, 0.082, 2, True, True, False, 0.12))
+        # 尾部仍在变动：平窗只有 0.05 秒。
+        moving = [(9.0, 0.996), (9.6, 0.109), (9.65, 0.082), (9.7, 0.082)]
+        self.assertFalse(Rotation.bloom_floor_stall_allowed(
+            moving, 9.7, 8.0, 0.082, 2, True, True, False, 0.996))
+        # 预算未耗尽前不放行。
+        self.assertFalse(Rotation.bloom_floor_stall_allowed(
+            samples, 7.5, 8.0, 0.082, 2, True, True, False, 0.996))
+
+    def test_floor_stall_keeps_hard_limits_and_thresholds_untouched(self):
+        # 1.2.18 只加一条并列出口：八个硬约束常量、两个结束阈值与既有门限逐字不动。
+        self.assertEqual(self.rotation.BLOOM_TAIL_FLOOR_STALL_SPAN, 0.4)
+        self.assertEqual(self.rotation.BLOOM_TAIL_FLOOR_MAX, 0.10)
+        self.assertEqual(self.rotation.BLOOM_TAIL_FLOOR_SPAN, 1.0)
+        self.assertEqual(self.rotation.BLOOM_TAIL_FLOOR_RETRIES, 2)
+        self.assertEqual(self.rotation.BLOOM_COMPLETE_FORTE, 0.06)
+        self.assertEqual(self.rotation.BLOOM_ENDED_FORTE, 0.05)
+        self.assertEqual(self.rotation.BLOOM_OUTPUT_TIMEOUT, 8)
+        self.assertEqual(self.rotation.BLOOM_WALL_TIMEOUT, 16)
+        self.assertEqual(self.rotation.PHASE_TIMEOUT, 24)
+        self.assertEqual(self.rotation.BLOOM_TAIL_GRACE, 2)
+        self.assertEqual(self.rotation.BLOOM_TAIL_RECHECK, 0.4)
+        self.assertEqual(self.rotation.BLOOM_FEEDBACK_TIMEOUT, 1.2)
+        self.assertEqual(self.rotation.BLOOM_TARGET_WAIT_MAX, 2.0)
+        self.assertEqual(self.rotation.BLOOM_TARGET_WAIT_TOTAL, 3.0)
+
+    def test_untargeted_aborts_zero_read_sample_segment_without_locking(self):
+        # 1.2.19：1.2.18 run2 的 streak=84 段整段零可读、target_state=unlocked、heavy_retries=0，
+        # 8 秒里根本没有目标可打；这种段只早退交回轮转，不判完成。
+        self.assertEqual(self.rotation.BLOOM_OUTPUT_UNTARGETED_SPAN, 2.0)
+        self.assertTrue(Rotation.bloom_output_untargeted(4.0, 1.5, True, True, False, []))
+        self.assertTrue(Rotation.bloom_output_untargeted(2.0, 0.0, True, True, False, []))
+        # 出现过可读样本、标记不可见、丢锁跨度不足、角色不在场或解放态一律不放行。
+        self.assertFalse(Rotation.bloom_output_untargeted(4.0, 1.5, True, True, False, [(3.9, 0.5)]))
+        self.assertFalse(Rotation.bloom_output_untargeted(4.0, 1.5, False, True, False, []))
+        self.assertFalse(Rotation.bloom_output_untargeted(4.0, 3.0, True, True, False, []))
+        self.assertFalse(Rotation.bloom_output_untargeted(4.0, None, True, True, False, []))
+        self.assertFalse(Rotation.bloom_output_untargeted(1.0, 0.0, True, True, False, []))
+        self.assertFalse(Rotation.bloom_output_untargeted(4.0, 1.5, True, False, False, []))
+        self.assertFalse(Rotation.bloom_output_untargeted(4.0, 1.5, True, True, True, []))
+
+    def test_untargeted_keeps_hard_limits_and_thresholds_untouched(self):
+        # 1.2.19 只加一条早退：八个硬约束常量、两个结束阈值与既有门限逐字不动。
+        self.assertEqual(self.rotation.BLOOM_NOT_ENGAGED_AFTER, 2.0)
+        self.assertEqual(self.rotation.BLOOM_TAIL_FLOOR_STALL_SPAN, 0.4)
+        self.assertEqual(self.rotation.BLOOM_COMPLETE_FORTE, 0.06)
+        self.assertEqual(self.rotation.BLOOM_ENDED_FORTE, 0.05)
+        self.assertEqual(self.rotation.BLOOM_OUTPUT_TIMEOUT, 8)
+        self.assertEqual(self.rotation.BLOOM_WALL_TIMEOUT, 16)
+        self.assertEqual(self.rotation.PHASE_TIMEOUT, 24)
+        self.assertEqual(self.rotation.BLOOM_TAIL_GRACE, 2)
+        self.assertEqual(self.rotation.BLOOM_TAIL_RECHECK, 0.4)
+        self.assertEqual(self.rotation.BLOOM_FEEDBACK_TIMEOUT, 1.2)
+        self.assertEqual(self.rotation.BLOOM_TARGET_WAIT_MAX, 2.0)
+        self.assertEqual(self.rotation.BLOOM_TARGET_WAIT_TOTAL, 3.0)
+
+    def test_consumed_tail_stall_takes_flat_reading_after_one_tick_rise(self):
+        # 1.2.20：1.2.19 run1 实测 forte=0.279、steady_range=0.0、steady_hold=0.61、steady_flat=False、
+        # drop_total=0.025、consumed_ratio=0.72、history_reset=forte_rise（7.375 时 0.279 -> 0.304）；
+        # 1.2.10 要求 steady_hold>=1.0 与 steady_flat，边界前平窗攒不满，只能烧满预算。
+        samples = [(7.4 + index * 0.05, 0.279) for index in range(13)]
+        status = Rotation.bloom_tail_status(samples, 8.0, 0.996)
+        self.assertEqual(status['reason'], 'insufficient_decreases')
+        self.assertEqual(status['steady_range'], 0.0)
+        self.assertFalse(status['steady_flat'])
+        self.assertGreaterEqual(status['steady_hold'], 0.4)
+        self.assertAlmostEqual(status['consumed_ratio'], 0.72, places=2)
+        self.assertTrue(Rotation.bloom_consumed_tail_stall_allowed(
+            samples, 8.0, 8.0, 0.279, 2, True, True, False, 0.996))
+
+    def test_consumed_tail_stall_rejects_retry_short_or_unconsumed_forms(self):
+        # 反例护栏：补按未用尽、消耗不足、预算未耗尽、标记不可见、尾部平窗不足时一律交回原判据。
+        samples = [(7.4 + index * 0.05, 0.279) for index in range(13)]
+        self.assertFalse(Rotation.bloom_consumed_tail_stall_allowed(
+            samples, 8.0, 8.0, 0.279, 1, True, True, False, 0.996))
+        self.assertFalse(Rotation.bloom_consumed_tail_stall_allowed(
+            samples, 8.0, 8.0, 0.279, 2, True, True, False, 0.35))
+        self.assertFalse(Rotation.bloom_consumed_tail_stall_allowed(
+            samples, 7.5, 8.0, 0.279, 2, True, True, False, 0.996))
+        self.assertFalse(Rotation.bloom_consumed_tail_stall_allowed(
+            samples, 8.0, 8.0, 0.279, 2, True, False, False, 0.996))
+        # 尾部平窗只有 0.1 秒，不足以证明「打不动」。
+        short = [(7.9, 0.279), (7.95, 0.279), (8.0, 0.279)]
+        self.assertFalse(Rotation.bloom_consumed_tail_stall_allowed(
+            short, 8.0, 8.0, 0.279, 2, True, True, False, 0.996))
+
+    def test_consumed_tail_stall_keeps_hard_limits_and_thresholds_untouched(self):
+        # 1.2.20 只加一条并列出口：八个硬约束常量、两个结束阈值与既有门限逐字不动。
+        self.assertEqual(self.rotation.BLOOM_TAIL_CONSUMED_STALL_SPAN, 0.4)
+        self.assertEqual(self.rotation.BLOOM_TAIL_CONSUMED_SPAN, 1.0)
+        self.assertEqual(self.rotation.BLOOM_TAIL_DROP_TOTAL, 0.03)
+        self.assertEqual(self.rotation.BLOOM_TAIL_CONSUMED_RATIO, 0.65)
+        self.assertEqual(self.rotation.BLOOM_COMPLETE_FORTE, 0.06)
+        self.assertEqual(self.rotation.BLOOM_ENDED_FORTE, 0.05)
+        self.assertEqual(self.rotation.BLOOM_OUTPUT_TIMEOUT, 8)
+        self.assertEqual(self.rotation.BLOOM_WALL_TIMEOUT, 16)
+        self.assertEqual(self.rotation.PHASE_TIMEOUT, 24)
+        self.assertEqual(self.rotation.BLOOM_TAIL_GRACE, 2)
+        self.assertEqual(self.rotation.BLOOM_TAIL_RECHECK, 0.4)
+        self.assertEqual(self.rotation.BLOOM_FEEDBACK_TIMEOUT, 1.2)
+        self.assertEqual(self.rotation.BLOOM_TARGET_WAIT_MAX, 2.0)
+        self.assertEqual(self.rotation.BLOOM_TARGET_WAIT_TOTAL, 3.0)
+
+    def test_target_relock_takes_continuous_unlock_after_three_frames(self):
+        # 1.2.21：1.2.20 批 run1 的 untargeted 段 3.5 秒里 check_target Release/Retry=80/85，
+        # 而 target lost try retarget 一次都没打印（wait_count=0）：锁定在输出段就丢了，
+        # 却始终没有补锁动作，读数只能整段不可读。
+        self.assertEqual(self.rotation.BLOOM_TARGET_RELOCK_FRAMES, 3)
+        self.assertEqual(self.rotation.BLOOM_TARGET_RELOCK_TIMEOUT, 0.5)
+        self.assertEqual(self.rotation.BLOOM_TARGET_RELOCK_MAX, 2)
+        self.assertTrue(Rotation.bloom_target_relock_allowed(3, 0, True, True, False))
+        # 丢锁帧数不足、本段重锁已满两次、标记消失、角色不在场或解放态一律不补锁。
+        self.assertFalse(Rotation.bloom_target_relock_allowed(2, 0, True, True, False))
+        self.assertFalse(Rotation.bloom_target_relock_allowed(9, 2, True, True, False))
+        self.assertFalse(Rotation.bloom_target_relock_allowed(9, 0, True, False, False))
+        self.assertFalse(Rotation.bloom_target_relock_allowed(9, 0, False, True, False))
+        self.assertFalse(Rotation.bloom_target_relock_allowed(9, 0, True, True, True))
+
+    def test_target_relock_attempts_lock_before_untargeted_exit(self):
+        # 端到端：整段读数不可读、has_target 恒为假、开花标记仍在屏；必须先补锁（上限两次），
+        # 之后才轮到 1.2.19 的丢锁早退，bloom timing 行须带 relock=2。
+        self.char.get_forte = Mock(return_value=-1.0)
+        self.task.has_target = Mock(return_value=False)
+        with patch.object(self.char, 'logger') as logger:
+            self.rotation.bloom_output(self.char)
+        logs = [entry.args[0] for entry in logger.info.call_args_list]
+        self.assertTrue(any('bloom target relock count=1' in line for line in logs))
+        self.assertTrue(any('bloom target relock result count=2' in line for line in logs))
+        self.assertIn('relock=2', logs[-1])
+        self.assertIn('outcome=bloom output untargeted', logs[-1])
+
+    def test_target_relock_keeps_hard_limits_and_thresholds_untouched(self):
+        # 1.2.21 只补重锁动作：八个硬约束常量、两个结束阈值与 1.2.6–1.2.20 门限逐字不动。
+        self.assertEqual(self.rotation.BLOOM_TARGET_WAIT_MAX, 2.0)
+        self.assertEqual(self.rotation.BLOOM_TARGET_WAIT_TOTAL, 3.0)
+        self.assertEqual(self.rotation.BLOOM_OUTPUT_UNTARGETED_SPAN, 2.0)
+        self.assertEqual(self.rotation.BLOOM_TAIL_CONSUMED_STALL_SPAN, 0.4)
+        self.assertEqual(self.rotation.BLOOM_COMPLETE_FORTE, 0.06)
+        self.assertEqual(self.rotation.BLOOM_ENDED_FORTE, 0.05)
+        self.assertEqual(self.rotation.BLOOM_OUTPUT_TIMEOUT, 8)
+        self.assertEqual(self.rotation.BLOOM_WALL_TIMEOUT, 16)
+        self.assertEqual(self.rotation.PHASE_TIMEOUT, 24)
+        self.assertEqual(self.rotation.BLOOM_TAIL_GRACE, 2)
+        self.assertEqual(self.rotation.BLOOM_TAIL_RECHECK, 0.4)
+        self.assertEqual(self.rotation.BLOOM_FEEDBACK_TIMEOUT, 1.2)
+
+    def test_relock_counts_unlocked_frames_on_readable_readings(self):
+        # 1.2.22：1.2.21 批 run2 的 target lost 段实测 relock=0、estimate_drops=6、wait_count=1，
+        # 读数多数可读；旧逻辑先按「可读即在场」清零计数，重锁门永远攒不到 3 帧。
+        # 读数可读说明开花真没打完：补锁之后本段仍应烧满预算判 output timeout，
+        # 本条只验证「可读帧同样计入重锁」与 1.2.19 早退口径不变，不验证收尾。
+        self.char.get_forte = Mock(return_value=0.90)
+        self.task.has_target = Mock(return_value=False)
+        with patch.object(self.char, 'logger') as logger:
+            with self.assertRaises(RotationTimeout):
+                self.rotation.bloom_output(self.char)
+        logs = [entry.args[0] for entry in logger.info.call_args_list]
+        self.assertTrue(any('bloom target relock count=1' in line for line in logs))
+        self.assertTrue(any('readable=True' in line for line in logs))
+        self.assertIn('relock=2', logs[-1])
+        self.assertIn('relock_readable=2', logs[-1])
+        # 读数可读的丢锁帧不得触发 1.2.19 的零样本早退：该门限口径完全不变。
+        self.assertIn('untargeted=False', logs[-1])
+
+    def test_relock_readable_keeps_untargeted_gate_and_limits_untouched(self):
+        # 1.2.22 只放宽重锁计数：1.2.19 早退门限、八个硬约束常量与两个结束阈值逐字不动。
+        self.assertEqual(self.rotation.BLOOM_TARGET_RELOCK_FRAMES, 3)
+        self.assertEqual(self.rotation.BLOOM_TARGET_RELOCK_TIMEOUT, 0.5)
+        self.assertEqual(self.rotation.BLOOM_TARGET_RELOCK_MAX, 2)
+        self.assertEqual(self.rotation.BLOOM_OUTPUT_UNTARGETED_SPAN, 2.0)
+        self.assertEqual(self.rotation.BLOOM_OUTPUT_TIMEOUT, 8)
+        self.assertEqual(self.rotation.BLOOM_WALL_TIMEOUT, 16)
+        self.assertEqual(self.rotation.PHASE_TIMEOUT, 24)
+        self.assertEqual(self.rotation.BLOOM_TAIL_GRACE, 2)
+        self.assertEqual(self.rotation.BLOOM_TAIL_RECHECK, 0.4)
+        self.assertEqual(self.rotation.BLOOM_FEEDBACK_TIMEOUT, 1.2)
+        self.assertEqual(self.rotation.BLOOM_TARGET_WAIT_MAX, 2.0)
+        self.assertEqual(self.rotation.BLOOM_TARGET_WAIT_TOTAL, 3.0)
+        self.assertEqual(self.rotation.BLOOM_COMPLETE_FORTE, 0.06)
+        self.assertEqual(self.rotation.BLOOM_ENDED_FORTE, 0.05)
+
+    def test_budget_guard_field_present_and_zero_without_grace(self):
+        # 1.2.23：1.2.22 批 8.468s 那朵 tail_extra=+0.171、1.2.17 批更出现 +2.078；硬预算原先只在帧边界
+        # 复核，阻塞调用可以把 8+2 秒边界推过一个调用周期。这里验证预算未耗尽时 budget_guard=0。
+        def forte(**kwargs):
+            at = self.clock[0] - 100
+            return max(0.20, 0.92 - at * 0.35)
+
+        self.char.get_forte.side_effect = forte
+        with patch.object(self.char, 'logger') as logger:
+            self.rotation.bloom_output(self.char)
+        logs = [entry.args[0] for entry in logger.info.call_args_list]
+        self.assertIn('outcome=completed', logs[-1])
+        self.assertIn('budget_guard=0', logs[-1])
+        self.assertIn('tail_grace=False', logs[-1])
+
+    def test_budget_guard_rechecks_inside_grace_window(self):
+        # 宽限窗内每帧都要复核一次硬预算：一旦 tail_grace=True，guard 至少命中一次，
+        # 这样越界时不会等到下一次帧边界才发现。
+        def forte(**kwargs):
+            at = self.clock[0] - 100
+            return max(0.10, 0.92 - at * 0.08)
+
+        self.char.get_forte.side_effect = forte
+        with patch.object(self.char, 'logger') as logger:
+            with self.assertRaises(RotationTimeout):
+                self.rotation.bloom_output(self.char)
+        logs = [entry.args[0] for entry in logger.info.call_args_list]
+        self.assertIn('budget_guard=', logs[-1])
+        if 'tail_grace=True' in logs[-1]:
+            self.assertNotIn('budget_guard=0', logs[-1])
+
+    def test_budget_guard_keeps_hard_limits_and_thresholds_untouched(self):
+        # 1.2.23 只补复核点：八个硬约束常量、两个结束阈值与 1.2.6–1.2.22 门限逐字不动。
+        self.assertEqual(self.rotation.BLOOM_OUTPUT_TIMEOUT, 8)
+        self.assertEqual(self.rotation.BLOOM_WALL_TIMEOUT, 16)
+        self.assertEqual(self.rotation.PHASE_TIMEOUT, 24)
+        self.assertEqual(self.rotation.BLOOM_TAIL_GRACE, 2)
+        self.assertEqual(self.rotation.BLOOM_TAIL_RECHECK, 0.4)
+        self.assertEqual(self.rotation.BLOOM_FEEDBACK_TIMEOUT, 1.2)
+        self.assertEqual(self.rotation.BLOOM_TARGET_WAIT_MAX, 2.0)
+        self.assertEqual(self.rotation.BLOOM_TARGET_WAIT_TOTAL, 3.0)
+        self.assertEqual(self.rotation.BLOOM_COMPLETE_FORTE, 0.06)
+        self.assertEqual(self.rotation.BLOOM_ENDED_FORTE, 0.05)
+        self.assertEqual(self.rotation.BLOOM_TARGET_RELOCK_FRAMES, 3)
+        self.assertEqual(self.rotation.BLOOM_OUTPUT_UNTARGETED_SPAN, 2.0)
+
+    @staticmethod
+    def boundary_samples():
+        # 1.2.23 批实测形态：预算边界后读数由 0.082 掉到 0.032，本段峰值 0.996。
+        return [(7.0 + step * 0.09, 0.996 - step * 0.08) for step in range(13)]
+
+    def test_boundary_confirm_takes_single_frame_after_budget(self):
+        # 1.2.24：越界后允许「单帧 + 已消耗 >=65% 旁证」收尾，把两帧确认的成本从 tail_extra 去掉。
+        self.assertEqual(self.rotation.BLOOM_BOUNDARY_CONFIRM_RATIO, 0.65)
+        samples = self.boundary_samples()
+        self.assertTrue(Rotation.bloom_boundary_confirm_allowed(
+            0.036, True, False, True, False, 8.0, False, True, 8.08, 8.0, samples, 0.996))
+        # 宽限尚未开始时一律交回原 check_budget，避免抢走 1.2.5 低首帧形态的宽限。
+        self.assertFalse(Rotation.bloom_boundary_confirm_allowed(
+            0.036, True, False, True, False, 8.0, False, False, 8.08, 8.0, samples, 0.996))
+
+    def test_boundary_confirm_rejects_inside_budget_or_weak_evidence(self):
+        # 反例护栏：预算内、读数未到结束阈值、标记仍在屏、未见标记、解放态、不在场、
+        # 5.1 秒前、以及消耗不足（峰值过低）一律交回原判据，不允许单帧放行。
+        samples = self.boundary_samples()
+
+        def allowed(**overrides):
+            params = dict(forte=0.036, same_character=True, marker_visible=False, marker_seen=True,
+                          in_liberation=False, elapsed=8.0, resumed=False, tail_grace=True,
+                          output_wall=8.08, output_budget=8.0, samples=samples, baseline=0.996)
+            params.update(overrides)
+            return Rotation.bloom_boundary_confirm_allowed(
+                params['forte'], params['same_character'], params['marker_visible'],
+                params['marker_seen'], params['in_liberation'], params['elapsed'],
+                params['resumed'], params['tail_grace'], params['output_wall'],
+                params['output_budget'], params['samples'], params['baseline'])
+
+        self.assertTrue(allowed())
+        self.assertFalse(allowed(output_wall=7.9))
+        self.assertFalse(allowed(tail_grace=False))
+        self.assertFalse(allowed(forte=0.30))
+        self.assertFalse(allowed(forte=-1.0))
+        # 1.2.25 起「标记可见」不再一律拒绝，改由 BLOOM_BOUNDARY_MARKER_RATIO 把关：
+        # 消耗不足的标记可见形态仍必须交回原超时（此处 consumed≈0.82 < 0.90）。
+        self.assertFalse(allowed(marker_visible=True, baseline=0.20))
+        self.assertFalse(allowed(marker_seen=False))
+        self.assertFalse(allowed(in_liberation=True))
+        self.assertFalse(allowed(same_character=False))
+        self.assertFalse(allowed(elapsed=4.0))
+        self.assertFalse(allowed(baseline=0.04))
+
+    def test_boundary_confirm_keeps_hard_limits_and_thresholds_untouched(self):
+        # 1.2.24 只加越界后一条确认通道：两个结束阈值、八个硬约束常量与既有门限逐字不动。
+        self.assertEqual(self.rotation.BLOOM_BOUNDARY_CONFIRM_RATIO, 0.65)
+        self.assertEqual(self.rotation.BLOOM_TAIL_CONSUMED_RATIO, 0.65)
+        self.assertEqual(self.rotation.BLOOM_COMPLETE_FORTE, 0.06)
+        self.assertEqual(self.rotation.BLOOM_ENDED_FORTE, 0.05)
+        self.assertEqual(self.rotation.BLOOM_OUTPUT_TIMEOUT, 8)
+        self.assertEqual(self.rotation.BLOOM_WALL_TIMEOUT, 16)
+        self.assertEqual(self.rotation.PHASE_TIMEOUT, 24)
+        self.assertEqual(self.rotation.BLOOM_TAIL_GRACE, 2)
+        self.assertEqual(self.rotation.BLOOM_TAIL_RECHECK, 0.4)
+        self.assertEqual(self.rotation.BLOOM_FEEDBACK_TIMEOUT, 1.2)
+        self.assertEqual(self.rotation.BLOOM_TARGET_WAIT_MAX, 2.0)
+        self.assertEqual(self.rotation.BLOOM_TARGET_WAIT_TOTAL, 3.0)
+        self.assertEqual(self.rotation.BLOOM_TARGET_RELOCK_FRAMES, 3)
+
+    def test_boundary_marker_confirm_takes_visible_marker_after_full_consumption(self):
+        # 1.2.25：1.2.24 批 run2 实测 8.032 起宽限、读数 0.032 → 0.057（均 <=0.06）、
+        # consumed_ratio=0.943，却因开花标记仍在屏被 bloom_ended 与 1.2.24 通道同时挡住，
+        # 一路烧到 tail progress lost（tail_extra=+1.360）。
+        self.assertEqual(self.rotation.BLOOM_BOUNDARY_MARKER_RATIO, 0.90)
+        samples = self.boundary_samples()
+        self.assertTrue(Rotation.bloom_boundary_confirm_allowed(
+            0.036, True, True, True, False, 8.0, False, True, 8.08, 8.0, samples, 0.996))
+
+    def test_boundary_marker_confirm_rejects_unfinished_or_unreadable_forms(self):
+        # 反例护栏：消耗不足（峰值过低 / 真未打完）、读数超结束阈值、标记形态外的门一律不放行。
+        samples = self.boundary_samples()
+
+        def allowed(**overrides):
+            params = dict(forte=0.036, same_character=True, marker_visible=True, marker_seen=True,
+                          in_liberation=False, elapsed=8.0, resumed=False, tail_grace=True,
+                          output_wall=8.08, output_budget=8.0, samples=samples, baseline=0.996)
+            params.update(overrides)
+            return Rotation.bloom_boundary_confirm_allowed(
+                params['forte'], params['same_character'], params['marker_visible'],
+                params['marker_seen'], params['in_liberation'], params['elapsed'],
+                params['resumed'], params['tail_grace'], params['output_wall'],
+                params['output_budget'], params['samples'], params['baseline'])
+
+        self.assertTrue(allowed())
+        # 1.2.24 批 outside_tail 段形态：0.873 远高于结束阈值，必须继续超时。
+        self.assertFalse(allowed(forte=0.873, baseline=0.996))
+        self.assertFalse(allowed(baseline=0.20))
+        self.assertFalse(allowed(forte=-1.0))
+        self.assertFalse(allowed(tail_grace=False))
+        self.assertFalse(allowed(output_wall=7.9))
+        self.assertFalse(allowed(marker_seen=False))
+        self.assertFalse(allowed(same_character=False))
+        self.assertFalse(allowed(in_liberation=True))
+        self.assertFalse(allowed(elapsed=4.0))
+
+    def test_boundary_marker_confirm_keeps_hard_limits_and_thresholds_untouched(self):
+        # 1.2.25 只放宽标记可见形态：两个门限、八个硬约束常量与 1.2.19–1.2.24 判据逐字不动。
+        self.assertEqual(self.rotation.BLOOM_BOUNDARY_MARKER_RATIO, 0.90)
+        self.assertEqual(self.rotation.BLOOM_BOUNDARY_CONFIRM_RATIO, 0.65)
+        self.assertEqual(self.rotation.BLOOM_COMPLETE_FORTE, 0.06)
+        self.assertEqual(self.rotation.BLOOM_ENDED_FORTE, 0.05)
+        self.assertEqual(self.rotation.BLOOM_OUTPUT_TIMEOUT, 8)
+        self.assertEqual(self.rotation.BLOOM_WALL_TIMEOUT, 16)
+        self.assertEqual(self.rotation.PHASE_TIMEOUT, 24)
+        self.assertEqual(self.rotation.BLOOM_TAIL_GRACE, 2)
+        self.assertEqual(self.rotation.BLOOM_TAIL_RECHECK, 0.4)
+        self.assertEqual(self.rotation.BLOOM_FEEDBACK_TIMEOUT, 1.2)
+        self.assertEqual(self.rotation.BLOOM_TARGET_WAIT_MAX, 2.0)
+        self.assertEqual(self.rotation.BLOOM_TARGET_WAIT_TOTAL, 3.0)
+        self.assertEqual(self.rotation.BLOOM_TARGET_RELOCK_FRAMES, 3)
+        self.assertEqual(self.rotation.BLOOM_OUTPUT_UNTARGETED_SPAN, 2.0)
+
+    def test_boundary_trend_takes_still_decreasing_reading_after_budget(self):
+        # 1.2.26：1.2.25 批 +0.406 那朵实测边界时 forte=0.156、decreases=13、drop_total=0.247、
+        # consumed_ratio=0.943 —— 读数仍在单调下降，只是还没到 BLOOM_COMPLETE_FORTE。
+        self.assertEqual(self.rotation.BLOOM_BOUNDARY_TREND_FORTE, 0.20)
+        self.assertEqual(self.rotation.BLOOM_BOUNDARY_TREND_RATIO, 0.90)
+        self.assertEqual(self.rotation.BLOOM_BOUNDARY_TREND_DECREASES, 3)
+        self.assertEqual(self.rotation.BLOOM_BOUNDARY_TREND_DROP, 0.15)
+        self.assertEqual(self.rotation.BLOOM_BOUNDARY_TREND_MAX_AGE, 0.25)
+        samples = self.boundary_samples()
+        self.assertTrue(Rotation.bloom_boundary_trend_allowed(
+            0.156, True, True, False, 8.0, False, True, 8.08, 8.0, samples, 0.996))
+
+    def test_boundary_trend_rejects_unfinished_flat_or_stale_forms(self):
+        # 反例护栏：预算内、宽限未开始、读数仍高（真未打完）、平窗无下降、样本过期、
+        # 消耗不足、标记未见、解放态、不在场、5.1 秒前一律交回原超时。
+        samples = self.boundary_samples()
+
+        def allowed(**overrides):
+            params = dict(forte=0.156, same_character=True, marker_seen=True,
+                          in_liberation=False, elapsed=8.0, resumed=False, tail_grace=True,
+                          output_wall=8.08, output_budget=8.0, samples=samples, baseline=0.996)
+            params.update(overrides)
+            return Rotation.bloom_boundary_trend_allowed(
+                params['forte'], params['same_character'], params['marker_seen'],
+                params['in_liberation'], params['elapsed'], params['resumed'],
+                params['tail_grace'], params['output_wall'], params['output_budget'],
+                params['samples'], params['baseline'])
+
+        self.assertTrue(allowed())
+        self.assertFalse(allowed(output_wall=7.9))
+        self.assertFalse(allowed(tail_grace=False))
+        # 1.2.24 批 outside_tail 段：0.873 远高于趋势门，必须继续超时。
+        self.assertFalse(allowed(forte=0.873))
+        self.assertFalse(allowed(forte=-1.0))
+        # 1.2.10 那种纹丝不动的平窗不算下降证据。
+        flat = [(7.5 + step * 0.05, 0.20) for step in range(12)]
+        self.assertFalse(allowed(samples=flat, forte=0.20))
+        # 样本过期（1.2.25 批边界断流形态 sample_age=0.89）。
+        self.assertFalse(allowed(samples=samples[:-6]))
+        self.assertFalse(allowed(baseline=0.20))
+        self.assertFalse(allowed(marker_seen=False))
+        self.assertFalse(allowed(same_character=False))
+        self.assertFalse(allowed(in_liberation=True))
+        self.assertFalse(allowed(elapsed=4.0))
+
+    def test_boundary_trend_keeps_hard_limits_and_thresholds_untouched(self):
+        # 1.2.26 只加一条趋势门：两个结束阈值、八个硬约束常量与 1.2.19–1.2.25 门限逐字不动。
+        self.assertEqual(self.rotation.BLOOM_BOUNDARY_TREND_FORTE, 0.20)
+        self.assertEqual(self.rotation.BLOOM_BOUNDARY_MARKER_RATIO, 0.90)
+        self.assertEqual(self.rotation.BLOOM_BOUNDARY_CONFIRM_RATIO, 0.65)
+        self.assertEqual(self.rotation.BLOOM_COMPLETE_FORTE, 0.06)
+        self.assertEqual(self.rotation.BLOOM_ENDED_FORTE, 0.05)
+        self.assertEqual(self.rotation.BLOOM_OUTPUT_TIMEOUT, 8)
+        self.assertEqual(self.rotation.BLOOM_WALL_TIMEOUT, 16)
+        self.assertEqual(self.rotation.PHASE_TIMEOUT, 24)
+        self.assertEqual(self.rotation.BLOOM_TAIL_GRACE, 2)
+        self.assertEqual(self.rotation.BLOOM_TAIL_RECHECK, 0.4)
+        self.assertEqual(self.rotation.BLOOM_FEEDBACK_TIMEOUT, 1.2)
+        self.assertEqual(self.rotation.BLOOM_TARGET_WAIT_MAX, 2.0)
+        self.assertEqual(self.rotation.BLOOM_TARGET_WAIT_TOTAL, 3.0)
+        self.assertEqual(self.rotation.BLOOM_TARGET_RELOCK_FRAMES, 3)
+        self.assertEqual(self.rotation.BLOOM_OUTPUT_UNTARGETED_SPAN, 2.0)
+
 
 if __name__ == '__main__':
     unittest.main()
