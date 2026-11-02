@@ -5,6 +5,7 @@ on:
   push:
     tags:
       - 'v*'
+  workflow_dispatch:
 
 concurrency:
   group: windows-release-${{ github.ref }}
@@ -59,6 +60,7 @@ jobs:
           python -m pip install ".[dev]"
 
       - name: Prepare release requirements
+        if: github.event_name == 'push'
         env:
           RELEASE_TAG: ${{ github.ref_name }}
         run: python -m ok.update.inline_ok_requirements --tag "$env:RELEASE_TAG"
@@ -113,6 +115,7 @@ jobs:
 
     steps:
       - name: Configure runner
+        if: github.repository == 'ok-oldking/ok-wuthering-waves'
         shell: pwsh
         run: |
           [Console]::OutputEncoding = [System.Text.Encoding]::UTF8
@@ -122,6 +125,7 @@ jobs:
           git config --global user.name "ok-oldking"
 
       - name: Check out source
+        if: github.repository == 'ok-oldking/ok-wuthering-waves'
         uses: actions/checkout@v4
         with:
           lfs: true
@@ -129,6 +133,7 @@ jobs:
           persist-credentials: false
 
       - name: Set up Python ${{ env.PYTHON_VERSION }}
+        if: github.repository == 'ok-oldking/ok-wuthering-waves'
         uses: actions/setup-python@v5
         with:
           python-version: ${{ env.PYTHON_VERSION }}
@@ -138,11 +143,13 @@ jobs:
             pyproject.toml
 
       - name: Install dependencies
+        if: github.repository == 'ok-oldking/ok-wuthering-waves'
         run: |
           python -m pip install -r requirements.txt
           python -m pip install ".[dev]"
 
       - name: Prepare release requirements
+        if: github.repository == 'ok-oldking/ok-wuthering-waves' && github.event_name == 'push'
         env:
           RELEASE_TAG: ${{ github.ref_name }}
         run: python -m ok.update.inline_ok_requirements --tag "$env:RELEASE_TAG"
@@ -160,7 +167,7 @@ jobs:
 
       - name: Synchronize update repositories
         id: sync
-        if: github.repository == 'ok-oldking/ok-wuthering-waves'
+        if: github.repository == 'ok-oldking/ok-wuthering-waves' && github.event_name == 'push'
         uses: ok-oldking/partial-sync-repo@master
         with:
           repos: |
@@ -197,6 +204,7 @@ jobs:
           persist-credentials: false
 
       - name: Set up Python ${{ env.PYTHON_VERSION }}
+        if: github.repository == 'ok-oldking/ok-wuthering-waves'
         uses: actions/setup-python@v5
         with:
           python-version: ${{ env.PYTHON_VERSION }}
@@ -206,14 +214,21 @@ jobs:
             pyproject.toml
 
       - name: Install dependencies
+        if: github.repository == 'ok-oldking/ok-wuthering-waves'
         run: |
           python -m pip install -r requirements.txt
           python -m pip install ".[dev]"
 
       - name: Prepare release requirements
+        if: github.repository == 'ok-oldking/ok-wuthering-waves' && github.event_name == 'push'
         env:
           RELEASE_TAG: ${{ github.ref_name }}
         run: python -m ok.update.inline_ok_requirements --tag "$env:RELEASE_TAG"
+
+      - name: Prepare launcher source
+        if: env.BUILD_EXE == 'true' && github.repository != 'ok-oldking/ok-wuthering-waves'
+        shell: pwsh
+        run: ./scripts/build_personal_launcher.ps1 -PrepareOnly -LauncherRepositoryUrl 'https://github.com/ok-oldking/pyappify.git'
 
       - name: Set up pnpm
         if: env.BUILD_EXE == 'true' && github.repository != 'ok-oldking/ok-wuthering-waves'
@@ -221,6 +236,20 @@ jobs:
         with:
           version: 11
           run_install: false
+
+      - name: Set up Node and cache pnpm dependencies
+        if: env.BUILD_EXE == 'true' && github.repository != 'ok-oldking/ok-wuthering-waves'
+        uses: actions/setup-node@v4
+        with:
+          node-version: '24'
+          cache: pnpm
+          cache-dependency-path: build/pyappify/pnpm-lock.yaml
+
+      - name: Cache Rust dependencies
+        if: env.BUILD_EXE == 'true' && github.repository != 'ok-oldking/ok-wuthering-waves'
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: build/pyappify/src-tauri -> target
 
       - name: Verify launcher build prerequisites
         if: env.BUILD_EXE == 'true' && github.repository != 'ok-oldking/ok-wuthering-waves'
@@ -264,7 +293,7 @@ jobs:
       - name: Reuse base executable
         id: reuse_executable
         uses: ok-oldking/pyappify-action@master
-        if: env.BUILD_EXE == 'true' && env.USE_RELEASE != ''
+        if: env.BUILD_EXE == 'true' && env.USE_RELEASE != '' && github.repository == 'ok-oldking/ok-wuthering-waves'
         env:
           GITHUB_TOKEN: ${{ github.token }}
         with:
@@ -436,11 +465,14 @@ jobs:
         with:
           name: release-assets
           path: pyappify_dist/*
+          compression-level: 0
           if-no-files-found: error
           retention-days: 7
 
   publish:
     name: 4 · Publish
+    # Manual builds can warm default-branch caches without creating a release.
+    if: github.event_name == 'push'
     needs: [ synchronize, package ]
     runs-on: ubuntu-latest
 
@@ -450,6 +482,20 @@ jobs:
         with:
           name: release-assets
           path: pyappify_dist
+
+      - name: Generate and verify SHA-256 checksums
+        shell: bash
+        run: |
+          set -euo pipefail
+          cd pyappify_dist
+          mapfile -d '' assets < <(find . -maxdepth 1 -type f ! -name 'SHA256SUMS.txt' -printf '%f\0' | LC_ALL=C sort -z)
+          if (( ${#assets[@]} == 0 )); then
+            echo 'No release assets found.' >&2
+            exit 1
+          fi
+          sha256sum -- "${assets[@]}" > SHA256SUMS.txt
+          sha256sum --check --strict SHA256SUMS.txt
+          cat SHA256SUMS.txt
 
       - name: Create GitHub release
         uses: softprops/action-gh-release@v2
@@ -462,9 +508,12 @@ jobs:
             ### 下载包说明（本仓库 / This repository）
               * [ok-ww-personal-win32-setup.exe](https://github.com/${{ github.repository }}/releases/download/${{ github.ref_name }}/ok-ww-personal-win32-setup.exe) 双版本启动器安装包；安装后在启动器的配置选项中选择 `Official`（官方 CNB 更新仓库）或 `Personal`（本仓库的版本标签），首次安装所选版本需要联网下载，默认保留手动更新与关闭自动启动。
               * [ok-ww-personal-win32.zip](https://github.com/${{ github.repository }}/releases/download/${{ github.ref_name }}/ok-ww-personal-win32.zip) 免安装版；解压后运行 `ok-ww-personal.exe`，并保留同目录的 `pyappify.yml`。
+            ### 校验下载文件 / Verify downloads
+              * [SHA256SUMS.txt](https://github.com/${{ github.repository }}/releases/download/${{ github.ref_name }}/SHA256SUMS.txt) 包含本次上传文件的 SHA-256；校验值在所有打包与签名步骤结束后生成。
+              * Windows：运行 `Get-FileHash .\ok-ww-personal-win32-setup.exe -Algorithm SHA256`，将结果与清单中同名文件对照。Linux：在下载目录运行 `sha256sum --check SHA256SUMS.txt`。
+              * 个人双版本安装包目前未做 Authenticode 数字签名。校验值用于核对文件完整性；如果文件和校验清单被同时替换，单凭 SHA-256 无法验证发布者身份。
             ### 上游官方安装包 / Upstream official installers
-              * [ok-ww-win32-China-setup.exe](https://github.com/${{ github.repository }}/releases/download/${{ github.ref_name }}/ok-ww-win32-China-setup.exe) 完整安装包, 更新使用阿里云+腾讯CNB. 仅上游仓库 `ok-oldking/ok-wuthering-waves` 产出。
-              * [ok-ww-win32-Global-setup.exe](https://github.com/${{ github.repository }}/releases/download/${{ github.ref_name }}/ok-ww-win32-Global-setup.exe) full package with dependencies, using GitHub and PyPi as update source. 仅上游仓库产出。
+              * 官方 China / Global 安装包请到 [上游 Release 页面](https://github.com/ok-oldking/ok-wuthering-waves/releases/latest) 下载。
               * 不要下载自动生成的 SourceCode.zip, Do Not Download the SourceCode
             ### 如果无法下载或下载慢, 可以使用其他下载源
               * [Mirror酱下载渠道](https://mirrorchyan.com/zh/projects?rid=okww&source=ok-ww-release), 国内网页直链, 下载需要购买CD-KEY, 已有Mirror酱CD-KEY可免费下载

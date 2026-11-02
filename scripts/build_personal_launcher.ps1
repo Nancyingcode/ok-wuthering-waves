@@ -109,9 +109,10 @@ if (Test-Path -LiteralPath (Join-Path $SourceRoot 'node_modules')) {
 Push-Location $SourceRoot
 try {
     Invoke-Checked $PnpmCommand @('install', '--frozen-lockfile')
-    Invoke-Checked $PnpmCommand @('build')
-    Invoke-Checked $CargoCommand @('test', '--release', '--manifest-path', 'src-tauri/Cargo.toml', '--lib', 'launcher_profiles')
+    # Tauri builds the frontend once via beforeBuildCommand. Build before tests
+    # so a clean checkout has the frontend assets embedded by the Rust library.
     Invoke-Checked $PnpmCommand @('tauri', 'build', '--no-bundle')
+    Invoke-Checked $CargoCommand @('test', '--release', '--manifest-path', 'src-tauri/Cargo.toml', '--lib', 'launcher_profiles')
     # Bundling is a separate step so the portable executable above is reused
     # instead of being rebuilt from scratch by the Tauri bundler.
     Invoke-Checked $PnpmCommand @('tauri', 'bundle')
