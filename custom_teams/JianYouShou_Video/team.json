@@ -1,0 +1,7 @@
+{
+  "name": "鉴尤守 · 视频循环",
+  "description": "BV18kW3zoEei：鉴心、尤诺、守岸人。1.0.3修复月弓E冷却硬判断导致空中停手：有限窗口交替E和普攻，冷却未确认也继续输出，不等普通E转好。保留落地检查修复、切人保护与额外3A。待实机复测。",
+  "author": "Codex（视频参考：问号七月三）",
+  "version": "1.0.3",
+  "team": "Iuno, Jianxin, Shorekeeper"
+}
