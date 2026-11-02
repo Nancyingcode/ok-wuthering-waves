@@ -24,13 +24,20 @@ async function checkVersion({ github, context, version, sha }) {
   if (existingRelease) {
     throw new Error(`Release ${version} already exists. Choose a new version or remove a failed draft before retrying.`);
   }
-  const taggedCommit = await getOrNull(() => github.rest.repos.getCommit({
-    ...context.repo, ref: `refs/tags/${version}`,
+  // A missing tag returns 422 from the commits API; only the ref API's 404
+  // identifies a new version without hiding other validation failures.
+  const tagRef = await getOrNull(() => github.rest.git.getRef({
+    ...context.repo, ref: `tags/${version}`,
   }));
-  if (taggedCommit && taggedCommit.sha !== sha) {
+  if (!tagRef) return false;
+
+  const { data: taggedCommit } = await github.rest.repos.getCommit({
+    ...context.repo, ref: `refs/tags/${version}`,
+  });
+  if (taggedCommit.sha !== sha) {
     throw new Error(`Tag ${version} points to ${taggedCommit.sha}, not source build commit ${sha}.`);
   }
-  return taggedCommit !== null;
+  return true;
 }
 
 async function validateSource({ github, context, version, runId }) {
