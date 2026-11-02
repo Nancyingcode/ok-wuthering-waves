@@ -1,23 +1,16 @@
-$Python = if (Test-Path ".\.venv\Scripts\python.exe") {
-  ".\.venv\Scripts\python.exe"
-} elseif (Test-Path ".\.venv\bin\python") {
-  ".\.venv\bin\python"
+param(
+    [int]$ShardIndex = 0,
+    [int]$ShardCount = 1
+)
+
+$ErrorActionPreference = 'Stop'
+$Python = if (Test-Path (Join-Path $PSScriptRoot '.venv/Scripts/python.exe')) {
+  Join-Path $PSScriptRoot '.venv/Scripts/python.exe'
+} elseif (Test-Path (Join-Path $PSScriptRoot '.venv/bin/python')) {
+  Join-Path $PSScriptRoot '.venv/bin/python'
 } else {
   "python"
 }
 
-Get-ChildItem -Path ".\tests\*.py" | ForEach-Object {
-  Write-Host "Running tests in $($_.FullName)"
-  try {
-      & $Python -u run_test.py $_.FullName
-
-      # Check if the previous command succeeded
-      if ($LASTEXITCODE -ne 0) {
-          throw "Tests failed in $($_.FullName)"
-      }
-  } catch {
-      # Stop the loop and return the error
-      Write-Error $_
-      exit 1
-  }
-}
+& $Python -u (Join-Path $PSScriptRoot 'scripts/run_python_tests.py') --shard-index $ShardIndex --shard-count $ShardCount
+exit $LASTEXITCODE

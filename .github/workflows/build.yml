@@ -11,6 +11,10 @@ on:
         description: 'Force launcher rebuild (keep Rust / pnpm dependency caches)'
         type: boolean
         default: false
+      validate_only:
+        description: 'Run all Python validation shards without packaging or publishing'
+        type: boolean
+        default: false
 
 concurrency:
   group: windows-release-${{ github.ref }}
@@ -30,8 +34,13 @@ env:
 
 jobs:
   validate:
-    name: 1 · Validate
+    name: 1 · Validate (shard ${{ matrix.shard }})
     runs-on: windows-latest
+    strategy:
+      fail-fast: false
+      # job-index/job-total partition one Python version across these runners.
+      matrix:
+        shard: [1, 2]
 
     steps:
       - name: Configure runner
@@ -47,7 +56,7 @@ jobs:
         uses: actions/checkout@v4
         with:
           lfs: true
-          fetch-depth: 0
+          fetch-depth: 1
           persist-credentials: false
 
       - name: Test build and publishing tools
@@ -63,9 +72,7 @@ jobs:
             pyproject.toml
 
       - name: Install dependencies
-        run: |
-          python -m pip install -r requirements.txt
-          python -m pip install ".[dev]"
+        run: python -m pip install -r requirements.txt ".[dev]"
 
       - name: Prepare release requirements
         if: github.event_name == 'push'
@@ -102,14 +109,16 @@ jobs:
             Remove-Item "Env:\$_" -ErrorAction SilentlyContinue
           }
 
-          Get-ChildItem -Path ".\tests\*.py" | ForEach-Object {
-            Write-Host "Running tests in $($_.FullName)"
-            python -u run_test.py $_.FullName
+          ./run_tests.ps1 -ShardIndex ${{ strategy.job-index }} -ShardCount ${{ strategy.job-total }}
 
-            if ($LASTEXITCODE -ne 0) {
-              throw "Tests failed in $($_.FullName)"
-            }
-          }
+      - name: Upload Python validation report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: python-validation-${{ strategy.job-index }}
+          path: build/python-validation/*.json
+          if-no-files-found: error
+          retention-days: 7
 
   synchronize:
     name: 2 · Synchronize repositories
@@ -190,7 +199,9 @@ jobs:
   package:
     name: 3 · Build and optionally sign
     needs: synchronize
-    if: github.repository == 'ok-oldking/ok-wuthering-waves'
+    if: >-
+      github.repository == 'ok-oldking/ok-wuthering-waves' &&
+      (github.event_name != 'workflow_dispatch' || !inputs.validate_only)
     runs-on: windows-latest
     env:
       SIGN_BUILD: ${{ needs.synchronize.outputs.is_release == 'true' && github.repository == 'ok-oldking/ok-wuthering-waves' }}
@@ -416,7 +427,9 @@ jobs:
   package_personal:
     name: 3 · Build personal launcher
     # Independent of validate: only publish joins the business/build gates.
-    if: github.repository != 'ok-oldking/ok-wuthering-waves'
+    if: >-
+      github.repository != 'ok-oldking/ok-wuthering-waves' &&
+      (github.event_name != 'workflow_dispatch' || !inputs.validate_only)
     runs-on: windows-latest
     env:
       SIGN_BUILD: 'false'

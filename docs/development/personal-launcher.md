@@ -67,9 +67,42 @@ The launcher manages one application with Official and Personal profiles baked i
 
 - `validate` 每次验证当前业务提交，`synchronize` 仍依赖 validate。fork 的 `package_personal` 与 validate 并行；原 `package` 仅在上游执行，并继续依赖 synchronize。
 - `publish` 等待以上四个 job，要求 validate、synchronize 和对应仓库的 package 路径成功；互斥路径 skipped 不阻断发布。失败、取消、手动构建或普通分支 push 均不能发布。
-- checkout 仍使用当前 tag / 提交及完整历史，PyAppify 则固定提交并通过 HTTPS 克隆。缓存中的旧 launcher 来源 SHA 只用于追溯，不替换本次业务 tag / SHA。
+- 打包 job 的 checkout 仍使用当前 tag / 提交及完整历史，PyAppify 则固定提交并通过 HTTPS 克隆。缓存中的旧 launcher 来源 SHA 只用于追溯，不替换本次业务 tag / SHA。
 - personal job 显式设置 `SIGN_BUILD=false`。上游的同步、SignPath 签名、官方 pyappify-action 和分发步骤保持原行为。
 - 只有实际 package 路径上传一个 `release-assets`。个人路径只 stage 安装包与 ZIP，保持现有补发入口的文件白名单兼容；完整成品命中无需独立便携 EXE，完整本地构建仍保留所有 dist 输出。
+
+### Python 全量验证 / Python Validation
+
+`validate` 在两个独立 Windows runner 上分片。每个 runner 仍通过原 `run_test.py` 为每个模块单独启动 Python，保留 Qt / OCR / SDK 进程隔离、AVX2 兼容设置、真实 OCR 推理和原有测试内容。分片不会让测试并发写同一工作目录的配置与日志。
+
+`scripts/run_python_tests.py` 按文件名稳定排序后，用零基 `strategy.job-index` / `strategy.job-total` 分配全部 `tests/*.py`，覆盖原来的 `Test*.py`、`test_*.py` 及其他根目录 Python 文件。当前矩阵只有分片维度，Python 版本统一为 3.12。无模块、空分片、非法参数、子进程失败或缺少有效 unittest 结果均使验证失败；失败模块之后的其他模块继续执行，两个分片也不会互相取消。
+
+每个分片上传独立的 `python-validation-<index>`，记录完整文件列表及 SHA-256、所选模块、每模块测试数、跳过数、退出码和耗时，可核对分片并集完整且不重复。`synchronize` / `publish` 仍等待整个 validate 矩阵成功，没有 continue-on-error 或缓存测试结果。验证只浅取当前提交及全部当前文件/LFS 内容；上游同步与打包 job 继续保留完整历史。依赖与本项目 dev extras 合并为一次 pip 安装，仍检查本项目能否正常构建安装。
+
+本地全量执行与分片示例：
+
+```powershell
+.\run_tests.ps1
+.\run_tests.ps1 -ShardIndex 0 -ShardCount 2
+.\run_tests.ps1 -ShardIndex 1 -ShardCount 2
+```
+
+手动测量 Python 验证时，在 **Windows Release → Run workflow** 勾选 `validate_only=true`。该模式运行全部 Python 分片及构建/发布工具回归，保留 synchronize 检查，跳过两条 package 路径；不生成 release-assets，也不适合作为 Publish Existing Build 的来源。默认 false 的普通手动构建保持完整流程。tag push 始终运行正常打包路径，忽略该手动开关；发布门禁仍要求所有验证及对应 package 成功，手动运行始终不发布。
+
+实测基线为 [运行 #6](https://github.com/Nancyingcode/ok-wuthering-waves/actions/runs/41377826101)，优化后为 [运行 #7](https://github.com/Nancyingcode/ok-wuthering-waves/actions/runs/41380592629)（代码提交 `32489fb`，手动 `validate_only=true`）：
+
+| 阶段 | 基线 | 优化后 |
+| --- | ---: | ---: |
+| 全部 validate 等待时间 | 229s | 182s，减少 47s / 20.5% |
+| 单个 validate job | 229s | 两个分片分别 182s、161s |
+| checkout | 52s | 35s、34s |
+| 依赖安装 | 56s | 69s、52s |
+| Run tests 步骤 | 95s | 54s、53s |
+| Python 测试 | 62 个模块 / 936 项 | 63 个模块 / 946 项，零跳过 |
+
+两个报告的模块并集完整且不重复；逐项核对基线 62 个测试文件的 SHA-256 和测试数均未变化，保留原有 936 项，并新增 10 项分片、进程隔离与失败传播回归。两个分片分别执行 32 / 31 个模块、528 / 418 项测试，均成功；发布工具回归同时通过。手动验证工作流总计 201s，package / publish 均 skipped，没有生成 release-assets、版本标签或 Release。
+
+该样本使用 Python 3.12.10，两个 Windows runner 镜像分别为 `20261021.278.1`、`20261030.294.1`；硬件分配、依赖缓存和镜像滚动会影响时间，不能承诺每次固定缩短。两个 validate job 的时长合计 343s，高于基线 229s；优化目标是缩短等待时间，runner 总用量没有等比例下降。手动验证模式跳过打包，其 201s 整体时长不与旧版完整构建的整体时长比较。
 
 ### 构建耗时与缓存 / Build Time and Caches
 
