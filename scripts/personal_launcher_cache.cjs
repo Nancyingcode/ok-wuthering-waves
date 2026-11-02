@@ -4,7 +4,7 @@ const os = require('node:os');
 const { createHash } = require('node:crypto');
 const { execFileSync } = require('node:child_process');
 
-const SCHEMA = 1; // Bump to invalidate immutable, damaged remote caches.
+const SCHEMA = 2; // Bump to invalidate immutable caches or require refreshed binaries.
 const SETTINGS = {
   name: 'ok-ww-personal', version: 'v1.2.3',
   commit: '52bc6d986aae93615673960256549f51f13c92b6',
@@ -62,7 +62,7 @@ function receipt(root, phase, write = false) {
   const prepared = assertPrepared(root);
   const filename = metadataPath(root, phase);
   const record = write ? null : readJson(filename);
-  const buildFingerprint = currentFingerprint(root).fingerprint;
+  const buildFingerprint = buildIdentity(currentFingerprint(root));
   if (write) writeJson(filename, { prepared, buildFingerprint, passed: true });
   else {
     const matchesCurrentBuild = record.passed === true && record.prepared === prepared && record.buildFingerprint === buildFingerprint;
@@ -72,9 +72,14 @@ function receipt(root, phase, write = false) {
   }
 }
 function fingerprint(inputs) {
-  const digest = hash(serialize({ schema: SCHEMA, inputs }));
-  return { schema: SCHEMA, fingerprint: digest, key: `personal-launcher-win-x64-v${SCHEMA}-${digest}`, inputs };
+  // A tested binary remains reusable after a runner refresh. Tool selectors in
+  // build.yml are hashed with the recipe; observed versions are provenance.
+  const { tools, ...artifactInputs } = inputs;
+  const digest = hash(serialize({ schema: SCHEMA, inputs: artifactInputs }));
+  return { schema: SCHEMA, fingerprint: digest, key: `personal-launcher-win-x64-v${SCHEMA}-${digest}`,
+    inputs: artifactInputs, tools };
 }
+const buildIdentity = data => hash(serialize({ fingerprint: data.fingerprint, tools: data.tools }));
 function toolVersions() {
   const version = (command, args) => execFileSync(command, args, { encoding: 'utf8' }).trim();
   // Invoke pnpm through PowerShell: pnpm.cmd is not an executable for execFile on Windows.
@@ -95,8 +100,9 @@ function buildEnvironment(env = process.env) {
     /^(CARGO|RUST|TAURI|VITE|PNPM|NPM_CONFIG|NODE_|CMAKE|CC(?:_|$)|CXX(?:_|$)|AR(?:_|$)|CFLAGS|CXXFLAGS|LDFLAGS|CL$|_CL_$|LINK$|_LINK_$|VC|WindowsSDK|SOURCE_DATE_EPOCH$|CI$)/i.test(key)
   ).sort().map(key => [key, hash(env[key])]));
 }
-function currentFingerprint(root) {
-  return fingerprint({ prepared: preparation(root), tools: toolVersions(), environment: buildEnvironment() });
+function currentFingerprint(root, tools = toolVersions()) {
+  return fingerprint({ prepared: preparation(root), tools, environment: buildEnvironment(),
+    platform: { os: process.platform, architecture: process.arch, target: SETTINGS.target } });
 }
 function readFingerprint(root) {
   const data = readJson(metadataPath(root, 'fingerprint'));
@@ -118,8 +124,14 @@ function validateCache(directory, expected) {
     if (manifest.schema !== SCHEMA || manifest.fingerprint !== expected.fingerprint) throw new Error('Manifest schema/fingerprint mismatch');
     if (manifest.upstreamCommit !== SETTINGS.commit) throw new Error('Manifest upstream commit mismatch');
     if (serialize(manifest.inputs) !== serialize(expected.inputs)) throw new Error('Manifest inputs mismatch');
+    const tools = manifest.buildTools;
+    const hasBuildTools = tools && ['node', 'pnpm', 'rustc', 'cargo', 'powershell', 'msvcInstallation', 'os', 'imageOS', 'imageVersion']
+      .every(key => typeof tools[key] === 'string' && tools[key].length > 0);
+    if (!hasBuildTools) throw new Error('Missing launcher build tool provenance');
     const test = manifest.launcherTest;
-    const hasMatchingTest = test?.passed === true && test.name === 'launcher_profiles' && test.fingerprint === expected.fingerprint;
+    const hasMatchingTest = test?.passed === true && test.name === 'launcher_profiles' &&
+      test.fingerprint === expected.fingerprint &&
+      test.buildFingerprint === buildIdentity({ fingerprint: expected.fingerprint, tools });
     if (!hasMatchingTest) throw new Error('Missing matching launcher test receipt');
     if (!manifest.source?.sha || !manifest.source.repository) throw new Error('Missing launcher build provenance');
     if (serialize(manifest.artifacts) !== serialize(artifactRecords(directory))) throw new Error('Artifact size/hash mismatch');
@@ -149,11 +161,11 @@ function createManifest(root, data) {
   const repository = process.env.GITHUB_REPOSITORY || git(root, 'remote', 'get-url', 'origin');
   const runId = process.env.GITHUB_RUN_ID || null;
   const manifest = {
-    schema: SCHEMA, fingerprint: data.fingerprint, inputs: data.inputs,
+    schema: SCHEMA, fingerprint: data.fingerprint, inputs: data.inputs, buildTools: data.tools,
     upstreamCommit: SETTINGS.commit,
     source: { repository, sha: process.env.GITHUB_SHA || git(root, 'rev-parse', 'HEAD'), runId,
       runUrl: runId ? `${process.env.GITHUB_SERVER_URL || 'https://github.com'}/${repository}/actions/runs/${runId}` : null },
-    launcherTest: { name: 'launcher_profiles', passed: true, fingerprint: data.fingerprint },
+    launcherTest: { name: 'launcher_profiles', passed: true, fingerprint: data.fingerprint, buildFingerprint: buildIdentity(data) },
     artifacts: artifactRecords(directory),
   };
   writeJson(path.join(directory, 'manifest.json'), manifest);
@@ -186,9 +198,9 @@ function summary(root) {
   const report = {
     currentSha: process.env.GITHUB_SHA || git(root, 'rev-parse', 'HEAD'),
     runUrl: process.env.GITHUB_RUN_ID ? `${process.env.GITHUB_SERVER_URL}/${process.env.GITHUB_REPOSITORY}/actions/runs/${process.env.GITHUB_RUN_ID}` : null,
-    fingerprint: data?.fingerprint, tools: data?.inputs.tools, cache,
+    fingerprint: data?.fingerprint, tools: data?.tools, cache,
     rustCacheHit: process.env.RUST_CACHE_HIT || 'not restored', pnpmCacheHit: process.env.PNPM_CACHE_HIT || 'not restored',
-    launcherSource: manifest?.source, artifacts: manifest?.artifacts,
+    launcherSource: manifest?.source, launcherBuildTools: manifest?.buildTools, artifacts: manifest?.artifacts,
     stages: readOptional('timings') || [], workflowSteps: JSON.parse(process.env.WORKFLOW_STEPS || '{}'),
     automaticPublish: isTagPush ? 'gated by validate/synchronize/package_personal' : false,
   };
@@ -208,11 +220,12 @@ function main(command, root = path.resolve(__dirname, '..'), argument) {
     case 'fingerprint': {
       assertPrepared(root);
       const tools = toolVersions();
+      if (process.platform !== 'win32' || process.arch !== 'x64') throw new Error('Expected Windows x64 launcher builder');
       if (!tools.rustc.includes(`host: ${SETTINGS.target}`)) throw new Error(`Expected Rust host ${SETTINGS.target}`);
       for (const key of ['CARGO_TARGET_DIR', 'CARGO_BUILD_TARGET', 'TAURI_CONFIG']) {
         if (process.env[key]) throw new Error(`Unsupported output/config override: ${key}`);
       }
-      const data = fingerprint({ prepared: preparation(root), tools, environment: buildEnvironment() });
+      const data = currentFingerprint(root, tools);
       writeJson(metadataPath(root, 'fingerprint'), data);
       output('key', data.key);
       break;
@@ -251,7 +264,7 @@ function main(command, root = path.resolve(__dirname, '..'), argument) {
   }
 }
 module.exports = { SCHEMA, SETTINGS, INPUT_FILES, RELEASE_FILES, fingerprint, fileHashes, validateCache,
-  writeIfChanged, preparation, assertPrepared, receipt, createManifest, clearCache, prepareLock, buildEnvironment, main };
+  writeIfChanged, preparation, assertPrepared, receipt, createManifest, clearCache, prepareLock, buildEnvironment, buildIdentity, main };
 if (require.main === module) {
   try { main(process.argv[2], process.argv[3] && path.resolve(process.argv[3]), process.argv[4]); }
   catch (error) { console.error(error.message); process.exitCode = 1; }
