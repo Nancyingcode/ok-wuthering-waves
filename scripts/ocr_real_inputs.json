@@ -1,0 +1,6 @@
+[
+  {"path": "tests/images/tacet_elimination_final.jpg", "label": "tacet.result", "roi": [0.3, 0.6, 0.7, 0.96]},
+  {"path": "tests/images/tacet_elimination_board.jpg", "label": "tacet.turn", "roi": [0, 0.15, 0.4, 0.23]},
+  {"path": "tests/images/echo_enhance.png", "label": "echo.title", "roi": [0, 0, 0.45, 0.18]},
+  {"path": "tests/images/find_confirm.png", "label": "confirm", "roi": [0.2, 0.5, 0.8, 0.95]}
+]

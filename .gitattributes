@@ -1,1 +1,5 @@
 .github/workflows/*.lock.yml linguist-generated=true merge=ours
+
+# Unified-diff context prefixes and generated SVG path data retain significant formatting.
+patches/ocr/*.patch text eol=lf whitespace=-blank-at-eol
+docs/development/ocr-memory-*-assets/*.svg text eol=lf whitespace=-blank-at-eol linguist-generated=true

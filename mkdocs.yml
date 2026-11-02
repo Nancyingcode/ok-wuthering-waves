@@ -41,6 +41,9 @@ nav:
   - 日本語: ja/index.md
   - Development:
       - Contributing: development/contributing.md
+      - OCR memory validation: development/ocr-memory-validation.md
+      - OCR memory follow-up: development/ocr-memory-followup-validation.md
+      - OCR memory round 3: development/ocr-memory-round3-validation.md
 
 markdown_extensions:
   - admonition
