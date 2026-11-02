@@ -67,7 +67,7 @@ The launcher manages one application with Official and Personal profiles baked i
 
 - `validate` 每次验证当前业务提交，`synchronize` 仍依赖 validate。fork 的 `package_personal` 与 validate 并行；原 `package` 仅在上游执行，并继续依赖 synchronize。
 - `publish` 等待以上四个 job，要求 validate、synchronize 和对应仓库的 package 路径成功；互斥路径 skipped 不阻断发布。失败、取消、手动构建或普通分支 push 均不能发布。
-- checkout 仍使用当前 tag / 提交及完整历史，PyAppify 则固定提交并通过 HTTPS 克隆。缓存中的旧 launcher 来源 SHA 只用于追溯，不替换本次业务 tag / SHA。
+- 打包 job 的 checkout 仍使用当前 tag / 提交及完整历史，PyAppify 则固定提交并通过 HTTPS 克隆。缓存中的旧 launcher 来源 SHA 只用于追溯，不替换本次业务 tag / SHA。
 - personal job 显式设置 `SIGN_BUILD=false`。上游的同步、SignPath 签名、官方 pyappify-action 和分发步骤保持原行为。
 - 只有实际 package 路径上传一个 `release-assets`。个人路径只 stage 安装包与 ZIP，保持现有补发入口的文件白名单兼容；完整成品命中无需独立便携 EXE，完整本地构建仍保留所有 dist 输出。
 
@@ -89,7 +89,20 @@ The launcher manages one application with Official and Personal profiles baked i
 
 手动测量 Python 验证时，在 **Windows Release → Run workflow** 勾选 `validate_only=true`。该模式运行全部 Python 分片及构建/发布工具回归，保留 synchronize 检查，跳过两条 package 路径；不生成 release-assets，也不适合作为 Publish Existing Build 的来源。默认 false 的普通手动构建保持完整流程。tag push 始终运行正常打包路径，忽略该手动开关；发布门禁仍要求所有验证及对应 package 成功，手动运行始终不发布。
 
-优化基线为 [运行 #6](https://github.com/Nancyingcode/ok-wuthering-waves/actions/runs/41377826101)：validate 229s，其中 checkout 52s、安装 56s、测试 95s，62 个模块 / 936 项测试。浅取、单次安装和分片的实际收益以新 CI 报告为准；两个 runner 会重复各自的环境准备，不把墙钟缩短视为 runner 总用量等比例下降。
+实测基线为 [运行 #6](https://github.com/Nancyingcode/ok-wuthering-waves/actions/runs/41377826101)，优化后为 [运行 #7](https://github.com/Nancyingcode/ok-wuthering-waves/actions/runs/41380592629)（代码提交 `32489fb`，手动 `validate_only=true`）：
+
+| 阶段 | 基线 | 优化后 |
+| --- | ---: | ---: |
+| 全部 validate 等待时间 | 229s | 182s，减少 47s / 20.5% |
+| 单个 validate job | 229s | 两个分片分别 182s、161s |
+| checkout | 52s | 35s、34s |
+| 依赖安装 | 56s | 69s、52s |
+| Run tests 步骤 | 95s | 54s、53s |
+| Python 测试 | 62 个模块 / 936 项 | 63 个模块 / 946 项，零跳过 |
+
+两个报告的模块并集完整且不重复；逐项核对基线 62 个测试文件的 SHA-256 和测试数均未变化，保留原有 936 项，并新增 10 项分片、进程隔离与失败传播回归。两个分片分别执行 32 / 31 个模块、528 / 418 项测试，均成功；发布工具回归同时通过。手动验证工作流总计 201s，package / publish 均 skipped，没有生成 release-assets、版本标签或 Release。
+
+该样本使用 Python 3.12.10，两个 Windows runner 镜像分别为 `20261021.278.1`、`20261030.294.1`；硬件分配、依赖缓存和镜像滚动会影响时间，不能承诺每次固定缩短。两个 validate job 的时长合计 343s，高于基线 229s；优化目标是缩短等待时间，runner 总用量没有等比例下降。手动验证模式跳过打包，其 201s 整体时长不与旧版完整构建的整体时长比较。
 
 ### 构建耗时与缓存 / Build Time and Caches
 
