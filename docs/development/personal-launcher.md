@@ -123,6 +123,24 @@ The launcher manages one application with Official and Personal profiles baked i
 
 v2 与旧 v1 缓存隔离，首次需要完整构建。回归覆盖实际出现过的 `20261021.278.1` → `20261030.294.1` 工具版本变化，并在真实固定版本源码的集成用例中切换 ImageVersion，验证 key 不变、原测试与哈希仍可核对，同时旧构建阶段收据被拒绝。
 
+v2 已在独立分支 `feat/personal/launcher-cache-policy` 的代码提交 `aaf0e10` 上完成两次完整手动 CI：
+
+| 样本 | 整体耗时 | personal package | 全部 Python 验证 | 成品缓存 |
+| --- | ---: | ---: | ---: | --- |
+| [首次构建 / 41384839758](https://github.com/Nancyingcode/ok-wuthering-waves/actions/runs/41384839758) | 8m55s | 521s | 165s | v2 miss；Rust / pnpm hit；6 项真实 launcher_profiles 通过后保存 |
+| [精确命中 / 41385591910](https://github.com/Nancyingcode/ok-wuthering-waves/actions/runs/41385591910) | 3m11s | 108s | 172s | manifest 与两项产物校验通过；跳过依赖恢复、编译、profiles 测试编译、打包及保存 |
+
+命中样本比首次建立缓存的整体等待时间减少 344s（64.3%），personal package 减少 413s（79.3%）；这反映完整构建与成品命中路径的差别，首次格式迁移仍需要构建。两次都使用 `20261030.294.1` 镜像，因此实际 CI 证明精确恢复及成品一致性；跨镜像稳定性由使用真实版本记录的回归和切换 ImageVersion 的真实源码集成用例证明，不能将这两次 CI 写成实际跨镜像命中。
+
+两次均执行全部 63 个 Python 模块 / 952 项测试，零跳过；逐项核对发布 `v1.0.3` 的测试文件内容与测试数均未变化，分片完整且不重复。构建/发布工具回归为 108 项（107 通过，唯一的真实源码集成用例在通用 validate 中按原规则跳过，并在 package 的 40 项专门检查中执行通过）。发布工作流、条件和失败门禁未修改，两次 Publish 均 skipped，没有创建标签或 Release。
+
+两次 key 均为 `personal-launcher-win-x64-v2-f307bc69599daeba6a996c00483bed3be2b157f20c3e2ca06dcc08beebe98f00`；命中时保留首次运行的来源、工具记录和测试收据，独立下载的原始产物字节一致：
+
+| 文件 | 字节数 | SHA-256 |
+| --- | ---: | --- |
+| `ok-ww-personal-win32-setup.exe` | 4,018,375 | `fce7678864a7719f6699ca3a63a076ad06fec6bc1aced6e263c05c50d611509f` |
+| `ok-ww-personal-win32.zip` | 5,109,950 | `59027018ba205882e35eeaa87fa4607b84e45c3ca7c78b2277a87a35af493683` |
+
 EXE/ZIP 上传继续使用 `compression-level: 0`。输入、manifest 和计时信息单独上传为 `launcher-build-metadata`，不会进入 release-assets。`report_personal` 在验证/构建结束（包括缓存保存 post-action）后采集各 job / action 的实际时间，单独上传 `launcher-run-timings`；GitHub run 页面提供完整工作流墙钟时间。脚本分别记录 Prepare、install、TypeScript/Vite、Rust 正式构建、测试编译/执行、NSIS、ZIP 等阶段耗时；Rust 阶段包含编译和链接，不能把日志空白视作链接耗时。
 
 ### 手动构建与回退 / Manual Builds and Fallback
