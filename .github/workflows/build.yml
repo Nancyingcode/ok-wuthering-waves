@@ -6,6 +6,11 @@ on:
     tags:
       - 'v*'
   workflow_dispatch:
+    inputs:
+      force_launcher_rebuild:
+        description: 'Force launcher rebuild (keep Rust / pnpm dependency caches)'
+        type: boolean
+        default: false
 
 concurrency:
   group: windows-release-${{ github.ref }}
@@ -45,8 +50,8 @@ jobs:
           fetch-depth: 0
           persist-credentials: false
 
-      - name: Test existing-build publishing tools
-        run: node --test tests/test_publish_existing_build.cjs
+      - name: Test build and publishing tools
+        run: node --test tests/test_publish_existing_build.cjs tests/test_personal_launcher_cache.cjs tests/test_launcher_workflow.cjs
 
       - name: Set up Python ${{ env.PYTHON_VERSION }}
         uses: actions/setup-python@v5
@@ -185,6 +190,7 @@ jobs:
   package:
     name: 3 · Build and optionally sign
     needs: synchronize
+    if: github.repository == 'ok-oldking/ok-wuthering-waves'
     runs-on: windows-latest
     env:
       SIGN_BUILD: ${{ needs.synchronize.outputs.is_release == 'true' && github.repository == 'ok-oldking/ok-wuthering-waves' }}
@@ -227,71 +233,6 @@ jobs:
         env:
           RELEASE_TAG: ${{ github.ref_name }}
         run: python -m ok.update.inline_ok_requirements --tag "$env:RELEASE_TAG"
-
-      - name: Prepare launcher source
-        if: env.BUILD_EXE == 'true' && github.repository != 'ok-oldking/ok-wuthering-waves'
-        shell: pwsh
-        run: ./scripts/build_personal_launcher.ps1 -PrepareOnly -LauncherRepositoryUrl 'https://github.com/ok-oldking/pyappify.git'
-
-      - name: Set up pnpm
-        if: env.BUILD_EXE == 'true' && github.repository != 'ok-oldking/ok-wuthering-waves'
-        uses: pnpm/action-setup@v4
-        with:
-          version: 11
-          run_install: false
-
-      - name: Set up Node and cache pnpm dependencies
-        if: env.BUILD_EXE == 'true' && github.repository != 'ok-oldking/ok-wuthering-waves'
-        uses: actions/setup-node@v4
-        with:
-          node-version: '24'
-          cache: pnpm
-          cache-dependency-path: build/pyappify/pnpm-lock.yaml
-
-      - name: Cache Rust dependencies
-        if: env.BUILD_EXE == 'true' && github.repository != 'ok-oldking/ok-wuthering-waves'
-        uses: Swatinem/rust-cache@v2
-        with:
-          workspaces: build/pyappify/src-tauri -> target
-
-      - name: Verify launcher build prerequisites
-        if: env.BUILD_EXE == 'true' && github.repository != 'ok-oldking/ok-wuthering-waves'
-        shell: pwsh
-        run: |
-          foreach ($tool in @('git', 'node', 'pnpm.cmd', 'cargo.exe')) {
-            $command = Get-Command $tool -ErrorAction SilentlyContinue
-            if (-not $command) {
-              throw "Missing launcher build prerequisite: $tool"
-            }
-            Write-Host "$tool -> $($command.Source)"
-          }
-          rustc --version
-
-      - name: Build Official / Personal launcher and installer
-        id: build_personal_launcher
-        if: env.BUILD_EXE == 'true' && github.repository != 'ok-oldking/ok-wuthering-waves'
-        shell: pwsh
-        run: |
-          $ErrorActionPreference = 'Stop'
-          ./scripts/build_personal_launcher.ps1 -LauncherRepositoryUrl 'https://github.com/ok-oldking/pyappify.git'
-          $artifacts = @(
-            'dist/ok-ww-personal-win32-setup.exe',
-            'dist/ok-ww-personal-win32.zip',
-            'dist/ok-ww-personal/ok-ww-personal.exe'
-          )
-          foreach ($artifact in $artifacts) {
-            if (-not (Test-Path -LiteralPath $artifact)) {
-              throw "Missing launcher artifact: $artifact"
-            }
-          }
-
-      - name: Stage launcher artifacts
-        if: env.BUILD_EXE == 'true' && github.repository != 'ok-oldking/ok-wuthering-waves'
-        shell: pwsh
-        run: |
-          New-Item -ItemType Directory -Path pyappify_dist -Force | Out-Null
-          Copy-Item -LiteralPath dist/ok-ww-personal-win32-setup.exe -Destination pyappify_dist
-          Copy-Item -LiteralPath dist/ok-ww-personal-win32.zip -Destination pyappify_dist
 
       - name: Reuse base executable
         id: reuse_executable
@@ -472,11 +413,207 @@ jobs:
           if-no-files-found: error
           retention-days: 7
 
+  package_personal:
+    name: 3 · Build personal launcher
+    # Independent of validate: only publish joins the business/build gates.
+    if: github.repository != 'ok-oldking/ok-wuthering-waves'
+    runs-on: windows-latest
+    env:
+      SIGN_BUILD: 'false'
+      CARGO_INCREMENTAL: '0'
+
+    steps:
+      - name: Configure runner
+        shell: pwsh
+        run: |
+          [Console]::OutputEncoding = [System.Text.Encoding]::UTF8
+          git config --global core.autocrlf false
+          git config --global core.eol lf
+
+      - name: Check out source
+        uses: actions/checkout@v4
+        with:
+          lfs: true
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Set up pnpm
+        if: env.BUILD_EXE == 'true'
+        uses: pnpm/action-setup@v4
+        with:
+          version: 11
+          run_install: false
+
+      - name: Set up Node
+        if: env.BUILD_EXE == 'true'
+        uses: actions/setup-node@v4
+        with:
+          node-version: '24'
+
+      - name: Set up Rust
+        if: env.BUILD_EXE == 'true'
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: '1.99.1'
+
+      - name: Prepare launcher source
+        if: env.BUILD_EXE == 'true'
+        run: ./scripts/build_personal_launcher.ps1 -Phase Prepare -LauncherRepositoryUrl 'https://github.com/ok-oldking/pyappify.git'
+
+      - name: Test preparation against pinned source
+        if: env.BUILD_EXE == 'true'
+        env:
+          LAUNCHER_INTEGRATION_SOURCE: build/pyappify
+        run: node --test tests/test_personal_launcher_cache.cjs
+
+      - name: Fingerprint complete launcher inputs
+        id: fingerprint
+        if: env.BUILD_EXE == 'true'
+        run: node scripts/personal_launcher_cache.cjs fingerprint
+
+      - name: Restore complete launcher artifacts
+        id: launcher_cache
+        if: env.BUILD_EXE == 'true' && !inputs.force_launcher_rebuild
+        uses: actions/cache/restore@v4
+        with:
+          path: build/launcher-cache
+          key: ${{ steps.fingerprint.outputs.key }}
+
+      - name: Verify complete launcher cache
+        id: verify_cache
+        if: env.BUILD_EXE == 'true'
+        env:
+          FORCE_LAUNCHER_REBUILD: ${{ inputs.force_launcher_rebuild }}
+          LAUNCHER_CACHE_HIT: ${{ steps.launcher_cache.outputs.cache-hit }}
+        run: node scripts/personal_launcher_cache.cjs verify
+
+      - name: Restore pnpm dependencies
+        id: pnpm_cache
+        if: env.BUILD_EXE == 'true' && steps.verify_cache.outputs.reuse_launcher != 'true'
+        uses: actions/setup-node@v4
+        with:
+          node-version: '24'
+          cache: pnpm
+          cache-dependency-path: build/pyappify/pnpm-lock.yaml
+
+      - name: Restore Rust dependencies
+        id: rust_cache
+        if: env.BUILD_EXE == 'true' && steps.verify_cache.outputs.reuse_launcher != 'true'
+        uses: Swatinem/rust-cache@v2
+        with:
+          # Replaces the implicit job key; toolchain/manifest hashes remain.
+          shared-key: personal-launcher
+          workspaces: build/pyappify/src-tauri -> target
+
+      - name: Build frontend and launcher
+        if: env.BUILD_EXE == 'true' && steps.verify_cache.outputs.reuse_launcher != 'true'
+        run: ./scripts/build_personal_launcher.ps1 -Phase Build
+
+      - name: Test launcher profiles
+        if: env.BUILD_EXE == 'true' && steps.verify_cache.outputs.reuse_launcher != 'true'
+        run: ./scripts/build_personal_launcher.ps1 -Phase Test
+
+      - name: Bundle installer and portable ZIP
+        if: env.BUILD_EXE == 'true' && steps.verify_cache.outputs.reuse_launcher != 'true'
+        run: ./scripts/build_personal_launcher.ps1 -Phase Bundle
+
+      - name: Record tested launcher artifacts
+        if: env.BUILD_EXE == 'true' && steps.verify_cache.outputs.reuse_launcher != 'true'
+        run: node scripts/personal_launcher_cache.cjs manifest
+
+      - name: Save tested launcher artifacts
+        if: env.BUILD_EXE == 'true' && steps.verify_cache.outputs.reuse_launcher != 'true' && steps.launcher_cache.outputs.cache-hit != 'true'
+        uses: actions/cache/save@v4
+        with:
+          path: build/launcher-cache
+          key: ${{ steps.fingerprint.outputs.key }}
+
+      - name: Stage verified release assets
+        if: env.BUILD_EXE == 'true'
+        run: node scripts/personal_launcher_cache.cjs stage
+
+      - name: Upload release assets
+        if: env.BUILD_EXE == 'true'
+        uses: actions/upload-artifact@v4
+        with:
+          name: release-assets
+          path: |
+            pyappify_dist/ok-ww-personal-win32-setup.exe
+            pyappify_dist/ok-ww-personal-win32.zip
+          compression-level: 0
+          if-no-files-found: error
+          retention-days: 7
+
+      - name: Write launcher summary
+        if: always() && env.BUILD_EXE == 'true'
+        env:
+          RUST_CACHE_HIT: ${{ steps.rust_cache.outputs.cache-hit }}
+          PNPM_CACHE_HIT: ${{ steps.pnpm_cache.outputs.cache-hit }}
+          WORKFLOW_STEPS: ${{ toJSON(steps) }}
+        run: node scripts/personal_launcher_cache.cjs summary
+
+      - name: Upload launcher metadata
+        if: always() && env.BUILD_EXE == 'true'
+        uses: actions/upload-artifact@v4
+        with:
+          name: launcher-build-metadata
+          path: build/launcher-metadata/*.json
+          if-no-files-found: warn
+          retention-days: 7
+
+  report_personal:
+    name: Build timing report
+    needs: [validate, synchronize, package, package_personal]
+    if: always() && !cancelled() && github.repository != 'ok-oldking/ok-wuthering-waves'
+    runs-on: ubuntu-latest
+    steps:
+      - name: Record completed jobs and action timings
+        id: timings
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const fs = require('node:fs');
+            const path = require('node:path');
+            const jobs = await github.paginate(github.rest.actions.listJobsForWorkflowRunAttempt, {
+              ...context.repo, run_id: context.runId, attempt_number: Number(process.env.GITHUB_RUN_ATTEMPT), per_page: 100,
+            });
+            const completed = jobs.filter(job => job.status === 'completed' && /^[123] · /.test(job.name));
+            const timed = completed.filter(job => Number.isFinite(Date.parse(job.started_at)) && Number.isFinite(Date.parse(job.completed_at)));
+            const seconds = item => item.completed_at && item.started_at
+              ? (Date.parse(item.completed_at) - Date.parse(item.started_at)) / 1000 : null;
+            const report = {
+              sha: context.sha,
+              runUrl: `${context.serverUrl}/${context.repo.owner}/${context.repo.repo}/actions/runs/${context.runId}`,
+              // This ends at the build/validation join; publishing/reporting may still run.
+              buildValidationWallSeconds: timed.length ? (Math.max(...timed.map(j => Date.parse(j.completed_at))) - Math.min(...timed.map(j => Date.parse(j.started_at)))) / 1000 : null,
+              jobs: completed.map(job => ({ name: job.name, conclusion: job.conclusion, seconds: seconds(job),
+                steps: (job.steps || []).map(step => ({ name: step.name, conclusion: step.conclusion, seconds: seconds(step) })) })),
+            };
+            const filename = path.join(process.env.RUNNER_TEMP, 'launcher-run-timings.json');
+            fs.writeFileSync(filename, JSON.stringify(report, null, 2));
+            core.setOutput('path', filename);
+            await core.summary.addHeading('Build / validation timings')
+              .addLink('Source run (full workflow wall time)', report.runUrl)
+              .addRaw(`\n\nBuild / validation wall time: ${report.buildValidationWallSeconds}s. Includes cache restore/save, upload and post-actions.\n\n`)
+              .addCodeBlock(JSON.stringify(report, null, 2), 'json').write();
+
+      - name: Upload run timings
+        uses: actions/upload-artifact@v4
+        with:
+          name: launcher-run-timings
+          path: ${{ steps.timings.outputs.path }}
+          retention-days: 7
+
   publish:
     name: 4 · Publish
     # Manual builds can warm default-branch caches without creating a release.
-    if: github.event_name == 'push'
-    needs: [ synchronize, package ]
+    if: >-
+      ${{ always() && !cancelled() &&
+          github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v') &&
+          needs.validate.result == 'success' && needs.synchronize.result == 'success' &&
+          ((github.repository == 'ok-oldking/ok-wuthering-waves' && needs.package.result == 'success') ||
+           (github.repository != 'ok-oldking/ok-wuthering-waves' && needs.package_personal.result == 'success')) }}
+    needs: [validate, synchronize, package, package_personal]
     runs-on: ubuntu-latest
 
     steps:
