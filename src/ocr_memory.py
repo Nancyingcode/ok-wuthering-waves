@@ -112,6 +112,7 @@ class ManagedOCR:
         self._name = name
         self._policy = _lifecycle_options(_ocr_options(executor, name))
         self._condition = threading.Condition(threading.Lock())
+        self._epoch = 0
         self._model = model
         self._active = 0
         self._recycling = False
@@ -156,8 +157,10 @@ class ManagedOCR:
             self._check_cancelled()
             if self._model is not None:
                 self._active += 1
+                self._epoch += 1
                 return self._model
             self._recycling = True
+            self._epoch += 1
         try:
             executor = self._executor()
             if executor is None:
@@ -178,6 +181,7 @@ class ManagedOCR:
                     self._generation += 1
                     self._reset_usage('model created')
                     self._active += 1
+                    self._epoch += 1
                     logger.info(f'Created OCR model {self._name}: generation {self._generation}')
                     self._log_lifecycle('created', seconds=time.monotonic() - started)
                     return model
@@ -188,6 +192,7 @@ class ManagedOCR:
             except Exception as error:
                 with self._condition:
                     self._model = model
+                    self._epoch += 1
                 logger.error('Could not drain OCR created during shutdown', error)
             finally:
                 model = None
@@ -195,6 +200,7 @@ class ManagedOCR:
         finally:
             with self._condition:
                 self._recycling = False
+                self._epoch += 1
                 self._condition.notify_all()
 
     def prepare(self):
@@ -273,6 +279,7 @@ class ManagedOCR:
             should_recycle = self._active == 0 and self._pending_reason is not None
             if should_recycle:
                 self._recycling = True
+            self._epoch += 1
             self._condition.notify_all()
         if should_recycle:
             self._recycle()
@@ -286,6 +293,7 @@ class ManagedOCR:
                 return
             self._pending_reason = 'idle'
             self._recycling = True
+            self._epoch += 1
         self._recycle()
 
     def _recycle(self):
@@ -303,7 +311,9 @@ class ManagedOCR:
             _drain_model(model)
             logger.info(f'Drained OCR model {self._name}: {time.monotonic() - started:.3f}s')
             self._log_lifecycle('drained', reason=reason, seconds=time.monotonic() - started)
-            self._model = None
+            with self._condition:
+                self._model = None
+                self._epoch += 1
             model = None
             if self._diagnostics:
                 self._diagnostic('references_cleared', manager_model_cleared=True, local_model_cleared=True,
@@ -328,7 +338,15 @@ class ManagedOCR:
                     self._idle_retry_after = time.monotonic() + self._policy['idle_seconds']
                 self._pending_reason = None
                 self._recycling = False
+                self._epoch += 1
                 self._condition.notify_all()
+
+    def diagnostic_state(self):
+        """Scalar versioned state; observers never borrow predictor references."""
+        with self._condition:
+            return {'epoch': self._epoch, 'generation': self._generation,
+                    'loaded': self._model is not None, 'active_calls': self._active,
+                    'recycling': self._recycling, 'creating': self._recycling and self._model is None}
 
     def _log_lifecycle(self, event, **fields):
         # Scalar events preserve the completed generation before counters reset,
@@ -352,6 +370,7 @@ class ManagedOCR:
                                         'device': 'NPU' if getattr(predictor, 'is_npu', False) else 'CPU'})
                 predictor = None
             return {'name': self._name, 'generation': self._generation,
+                    'epoch': self._epoch,
                     'loaded': self._model is not None, 'active_calls': self._active,
                     'calls': self._calls, 'idle_seconds': time.monotonic() - self._last_used,
                     'created_at': self._created_at if self._model is not None else None,
@@ -431,11 +450,12 @@ def _release_idle_ocr(self):
         has_enabled_tasks = not self.paused and any(
             task.enabled for task in (*self.onetime_tasks, *self.trigger_tasks))
         executor_busy = bool(has_pending_work or has_enabled_tasks)
+        idle_since = getattr(self, '_ocr_idle_since', None)
         if executor_busy:
-            self._ocr_idle_since = None
-        elif getattr(self, '_ocr_idle_since', None) is None:
-            self._ocr_idle_since = now
-        idle_since = self._ocr_idle_since
+            idle_since = None
+        elif idle_since is None:
+            idle_since = now
+        self._ocr_idle_since = idle_since
         # Model warmup can call back into the executor; never wait on its lock
         # while holding the scheduler lock.
         if not self._ocr_lib_lock.acquire(blocking=False):
@@ -447,7 +467,8 @@ def _release_idle_ocr(self):
             self._ocr_lib_lock.release()
     for instance in instances:
         policy = instance._policy
-        executor_idle = (not executor_busy and now - idle_since >= policy['idle_seconds'])
+        executor_idle = (not executor_busy and idle_since is not None
+                         and now - idle_since >= policy['idle_seconds'])
         if policy['idle_policy'] == 'ocr_idle' or executor_idle:
             instance.release_idle(now)
 
@@ -482,14 +503,16 @@ def install_ocr_idle_release():
 
     @wraps(run_job)
     def run_job_with_ocr_activity(self, job):
-        self._ocr_idle_since = None
+        with self.lock:
+            self._ocr_idle_since = None
         return run_job(self, job)
 
     @wraps(next_task)
     def next_task_with_ocr_activity(self):
         result = next_task(self)
         if result[0] is not None:
-            self._ocr_idle_since = None
+            with self.lock:
+                self._ocr_idle_since = None
         return result
 
     # Cached notification callers must share the task executor's model ownership.

@@ -44,6 +44,7 @@ nav:
       - OCR memory validation: development/ocr-memory-validation.md
       - OCR memory follow-up: development/ocr-memory-followup-validation.md
       - OCR memory round 3: development/ocr-memory-round3-validation.md
+      - OCR review fixes: development/ocr-review-fixes-validation.md
 
 markdown_extensions:
   - admonition

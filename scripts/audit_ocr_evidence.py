@@ -12,7 +12,8 @@ import sys
 import zipfile
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
-from scripts.benchmark_ocr import digest, percentile
+from scripts.benchmark_ocr import compare, digest, percentile
+from scripts.ocr_observer import completion_status
 
 MIB = 1024**2
 
@@ -77,21 +78,35 @@ def diagnostic_tables(path, output, label):
     for row in data:
         if row['event'] != 'release_tail':
             continue
-        state = (row.get('models') or [{}])[0] if label == 'managed' else row
+        versioned = row.get('diagnostic_schema_version', 0) >= 2
+        if versioned:
+            state = row['state_after']
+        elif label == 'managed':
+            state = (row.get('models') or [{}])[0]
+        else:
+            state = row
         supported = [item for item in row.get('weak_objects', []) if item['weakref_supported']]
         tails.append({'generation': row['release_generation'], 'delay': row['target_seconds'],
-                      'lateness': row['lateness_seconds'], 'private_mib': row['private_bytes'] / MIB,
+                      'lateness': row['lateness_seconds'],
+                      'private_mib': row['private_bytes'] / MIB if row.get('private_bytes') is not None else None,
                       'loaded': state.get('loaded'), 'current_generation': state.get('generation'),
                       'active_calls': state.get('active_calls'), 'recycling': state.get('recycling'),
+                      'interval_validity': row.get('valid_for_unloaded') if versioned else 'unknown',
+                      'invalid_reason': row.get('invalid_reason') if versioned else 'unknown',
                       'factory_overlap': factory_overlap(data, row['elapsed'], row['elapsed']) if label == 'direct' else None,
                       'weak_supported': len(supported), 'weak_alive': sum(item['alive'] for item in supported),
                       'weak_unsupported': sum(not item['weakref_supported'] for item in row.get('weak_objects', []))})
     write_csv(output / (label + '-tails.csv'), tails)
     categories = [dict(row) for row in data if row['event'] == 'memory_categories']
-    if label == 'direct':
-        for row in categories:
+    for row in categories:
+        if row.get('diagnostic_schema_version', 0) >= 2:
+            row['eligible_for_unloaded_comparison'] = row['valid_for_unloaded']
+        elif label == 'direct':
             row['factory_overlap'] = factory_overlap(data, row['elapsed'] - row['seconds'], row['elapsed'])
-            row['eligible_for_unloaded_comparison'] = not row['factory_overlap']
+            row['eligible_for_unloaded_comparison'] = False if row['factory_overlap'] else 'unknown'
+        else:
+            row['eligible_for_unloaded_comparison'] = 'unknown'
+    protocol = completion_status(data)
     result = {'sha256': digest(path), 'calls': sum(row['event'] == 'recognition' for row in data),
               'run_id': data[0]['run_id'], 'seconds': data[-1]['elapsed'], 'generations': generations,
               'native_shape_counts': dict(Counter(json.dumps([row['model'], row['shapes'], row.get('input_dtypes')])
@@ -100,12 +115,18 @@ def diagnostic_tables(path, output, label):
               'direct_release_boundaries': [{key: row.get(key) for key in
                                              ('elapsed', 'generation', 'private_bytes', 'active_calls', 'loaded')}
                                             for row in data if row['event'] == 'release_complete'],
-              'tails': tails, 'completed': any(row['event'] == 'completed' for row in data)}
+              'tails': tails, 'diagnostic_protocol': protocol,
+              'completed': protocol['status'] == 'success' if protocol['status'] != 'unknown' else None}
     return result
 
 
 def audit(prior, output, managed=None, direct=None):
     output.mkdir(parents=True, exist_ok=False)
+    if managed and direct:
+        comparison = compare(managed, [direct], strict=True)
+        (output / 'strict-comparison.json').write_text(json.dumps(comparison, ensure_ascii=False, indent=2), encoding='utf-8')
+        if not all(row['equal'] for row in comparison):
+            raise ValueError('Strict replay gate failed; see strict-comparison.json')
     records = rows(prior / 'continuous-A.jsonl')
     environment = next(row for row in records if row['event'] == 'environment')
     samples = [row for row in records if row['event'] == 'sample']

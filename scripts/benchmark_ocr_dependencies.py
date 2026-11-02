@@ -84,21 +84,25 @@ def main():
             result = notification.recognize(frame)
             assert any(box[0] == '500' for box in result), result
             proxy = notification._instance
-            trace.emit('first_notification', result=result, **ocr_snapshot(executor))
+            trace.emit('first_notification', result=result, proxy_id=id(proxy),
+                       monitor_alive=executor._ocr_idle_thread.is_alive(), **ocr_snapshot(executor))
             until = time.monotonic() + 80
             while time.monotonic() < until and proxy.snapshot()['loaded']:
                 time.sleep(.1)
             assert not proxy.snapshot()['loaded'], 'Default idle release not observed'
-            trace.emit('idle_released', **ocr_snapshot(executor))
+            trace.emit('idle_released', proxy_id=id(proxy), monitor_alive=executor._ocr_idle_thread.is_alive(),
+                       **ocr_snapshot(executor))
             assert notification.recognize(frame) == result
             assert notification._instance is proxy and proxy.snapshot()['generation'] == 2
-            trace.emit('notification_reloaded', result=result, **ocr_snapshot(executor))
+            trace.emit('notification_reloaded', result=result, same_proxy=notification._instance is proxy,
+                       proxy_id=id(proxy), monitor_alive=executor._ocr_idle_thread.is_alive(), **ocr_snapshot(executor))
             trace.emit('completed', expected_rejection=False)
             event.set()
             monitor = getattr(executor, '_ocr_idle_thread', None)
             if monitor is not None:
                 monitor.join(5)
                 assert not monitor.is_alive()
+                trace.emit('monitor_stopped', monitor_alive=monitor.is_alive())
     finally:
         event.set()
         logging.getLogger('ok').removeHandler(handler)

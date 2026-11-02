@@ -63,7 +63,9 @@ A 是默认配置。B 只改变 `preload=false`、`idle_policy=ocr_idle`，作�
 
 ## 正式部署目录的补丁核验
 
-第三轮将 CI 的准备步骤接到同一组固定来源 wheel：先构建并安装补丁，再通过 `prepare_ocr_release.py` 调用现有内联工具，同时内联 `ok` 和 `onnxocr`。准备器逐文件核对已安装包与 wheel，再核对部署目录；已有目录与目标 wheel 不符时拒绝打包，避免内联工具“目录已存在则跳过”而留下旧实现。部署清单会加入 OnnxOCR 和 `ocr-release-provenance.json`。
+CI 的准备步骤使用固定来源 wheel：先构建并安装补丁，再通过 `prepare_ocr_release.py` 调用现有内联工具，同时内联 `ok` 和 `onnxocr`。准备器在修改元数据前拒绝任何已有目标包目录或 provenance，要求使用全新 staging。它核对安装依赖的预期成员，但从 wheel 复制全部包内文件，不复制安装缓存。目标路径集合和每个文件哈希必须与 wheel 完全相等，额外同名包、字节码或原生文件也会失败。
+
+现有 inline helper 继续更新版本、requirements 和 deploy；helper 与实际导入探针均使用 `-B`，之后重新检查完整成员集合。探针验证 `onnxocr.predict_base` 等模块实际来自 staging，且具备补丁入口。全部通过后才写成功 provenance；不清理安装目录或已有 staging。部署清单会加入 OnnxOCR 和 `ocr-release-provenance.json`。
 
 以下命令会修改指定部署源码中的版本、requirements 和 deploy.txt，应只在 CI 干净检出或独立测试目录执行：
 
@@ -79,3 +81,7 @@ python scripts/prepare_ocr_release.py --app <独立部署源码目录> --wheels 
 ## 可选生命周期诊断
 
 `OKWW_OCR_DIAGNOSTICS=1` 为单个验证进程启用标量预算日志，默认关闭，不改变保护阈值。`benchmark_ocr_runtime.py --diagnostics` 另加有界弱引用和固定阶段内存分类观测；该模式用于归因，不能代替无诊断开销的性能验收。具体有界命令和结论见第三轮报告。
+
+审阅修复后的诊断 schema 2 使用生命周期 epoch 检查整个内存/分类查询区间，逐代记录 0/2/10/30 秒唯一目标。无效点仍保留但不提交分类；缺失、线程异常、事件丢失或退出超时均以非零退出且无成功终态收口。普通非诊断模式不新增 30 秒等待。旧日志的新增健康字段保持 unknown。
+
+完整固定序列验收使用 `benchmark_ocr.py compare --strict`；默认兼容模式的 `scope=observed_labels` 仅核对已经出现的标签输出。审计入口和新的 `scripts/reproduce_ocr_review.ps1 -Stage compare` 已调用严格门禁；第三轮归档脚本保留历史原文，不再作为本轮验收入口。实际结果、短诊断和标准补丁验证见 [审阅修复报告](../../docs/development/ocr-review-fixes-validation.md)。
