@@ -5,9 +5,16 @@ const path = require('node:path');
 const { spawnSync, execFileSync } = require('node:child_process');
 const { test } = require('node:test');
 const { SCHEMA, SETTINGS, INPUT_FILES, RELEASE_FILES, fingerprint, fileHashes, validateCache,
-  writeIfChanged, assertPrepared, receipt, createManifest, main } = require('../scripts/personal_launcher_cache.cjs');
+  writeIfChanged, assertPrepared, receipt, createManifest, buildEnvironment, buildIdentity, main } = require('../scripts/personal_launcher_cache.cjs');
 
 const ROOT = path.resolve(__dirname, '..');
+const OLD_TOOLS = {
+  node: 'v24.22.1', pnpm: '11.28.10', rustc: 'rustc 1.99.1', cargo: 'cargo 1.99.1',
+  powershell: 'PowerShell 7.6.7', msvcInstallation: '18.11.12315.225',
+  os: 'win32/x64/10.0.26100', imageOS: 'win25-vs2026', imageVersion: '20261021.278.1',
+};
+const NEW_TOOLS = { ...OLD_TOOLS, node: 'v24.22.2', powershell: 'PowerShell 7.6.9',
+  msvcInstallation: '18.11.12328.437', imageVersion: '20261030.294.1' };
 function fixture(t) {
   const tempRoot = fs.realpathSync(os.tmpdir());
   const directory = fs.mkdtempSync(path.join(tempRoot, 'personal-launcher-test-'));
@@ -28,16 +35,18 @@ function inputsFixture(t) {
   for (const name of INPUT_FILES) write(root, name, `input: ${name}`);
   return root;
 }
-function inputs(root, tools = { node: '24.17.0', pnpm: '11.8.0', rustc: '1.99.1', imageVersion: '20261101.1' }) {
-  return { files: fileHashes(root, INPUT_FILES), tools, settings: { target: 'x86_64-pc-windows-msvc', profile: 'release' } };
+function inputs(root, tools = OLD_TOOLS) {
+  return { files: fileHashes(root, INPUT_FILES), tools, settings: { ...SETTINGS },
+    platform: { os: 'win32', architecture: 'x64', target: SETTINGS.target } };
 }
 function cacheFixture(t) {
   const directory = fixture(t);
-  const expected = fingerprint({ files: { 'launcher.patch': 'a'.repeat(64) }, tools: { rustc: '1.99.1' } });
+  const expected = fingerprint({ files: { 'launcher.patch': 'a'.repeat(64) }, tools: OLD_TOOLS });
   const manifest = {
     schema: SCHEMA, fingerprint: expected.fingerprint, inputs: structuredClone(expected.inputs), upstreamCommit: SETTINGS.commit,
+    buildTools: structuredClone(OLD_TOOLS),
     source: { repository: 'Nancyingcode/ok-wuthering-waves', sha: 'a'.repeat(40), runId: 123, runUrl: 'https://github.com/example/actions/runs/123' },
-    launcherTest: { name: 'launcher_profiles', passed: true, fingerprint: expected.fingerprint },
+    launcherTest: { name: 'launcher_profiles', passed: true, fingerprint: expected.fingerprint, buildFingerprint: buildIdentity(expected) },
     artifacts: RELEASE_FILES.map(name => {
       write(directory, name, `binary-${name}`);
       const { createHash } = require('node:crypto');
@@ -71,17 +80,43 @@ for (const filename of INPUT_FILES) {
     assert.notEqual(fingerprint(inputs(root)).fingerprint, before);
   });
 }
-test('tool patch version, runner image and build parameters invalidate the fingerprint', t => {
+test('observed tool and runner refreshes keep the artifact key but change the build receipt identity', t => {
   const root = inputsFixture(t);
   const baseline = inputs(root);
   for (const key of Object.keys(baseline.tools)) {
     const changed = structuredClone(baseline);
     changed.tools[key] += '-changed';
-    assert.notEqual(fingerprint(changed).fingerprint, fingerprint(baseline).fingerprint);
+    assert.equal(fingerprint(changed).key, fingerprint(baseline).key, key);
+    assert.notEqual(buildIdentity(fingerprint(changed)), buildIdentity(fingerprint(baseline)), key);
   }
-  const changed = structuredClone(baseline);
-  changed.settings.profile = 'debug';
-  assert.notEqual(fingerprint(changed).fingerprint, fingerprint(baseline).fingerprint);
+  const previous = fingerprint(inputs(root, OLD_TOOLS));
+  const current = fingerprint(inputs(root, NEW_TOOLS));
+  assert.equal(current.key, previous.key);
+  assert.deepEqual(current.tools, NEW_TOOLS);
+  assert.deepEqual(previous.tools, OLD_TOOLS);
+  assert.equal(Object.hasOwn(current.inputs, 'tools'), false);
+});
+test('target, architecture, profile, features and upstream changes still invalidate the artifact key', t => {
+  const baseline = inputs(inputsFixture(t));
+  for (const [group, key, value] of [
+    ['platform', 'os', 'linux'], ['platform', 'architecture', 'arm64'],
+    ['platform', 'target', 'aarch64-pc-windows-msvc'], ['settings', 'profile', 'debug'],
+    ['settings', 'features', 'other'], ['settings', 'commit', 'b'.repeat(40)],
+  ]) {
+    const changed = structuredClone(baseline);
+    changed[group][key] = value;
+    assert.notEqual(fingerprint(changed).key, fingerprint(baseline).key, `${group}.${key}`);
+  }
+});
+test('compiler and bundler overrides remain fingerprint inputs and credentials are not recorded', () => {
+  const baseline = { CARGO_INCREMENTAL: '0', RUSTFLAGS: '-C codegen-units=1', TAURI_SIGNING_PASSWORD: 'secret', GITHUB_TOKEN: 'secret' };
+  const env = buildEnvironment(baseline);
+  assert.equal(JSON.stringify(env).includes('secret'), false);
+  assert.equal(Object.hasOwn(env, 'GITHUB_TOKEN'), false);
+  for (const key of ['CARGO_INCREMENTAL', 'RUSTFLAGS', 'TAURI_SIGNING_PASSWORD', 'SOURCE_DATE_EPOCH', 'CL']) {
+    const changed = buildEnvironment({ ...baseline, [key]: 'changed' });
+    assert.notEqual(fingerprint({ environment: changed }).key, fingerprint({ environment: env }).key, key);
+  }
 });
 test('enumeration/object order, path separators and mtimes do not change the fingerprint', t => {
   const root = inputsFixture(t);
@@ -102,13 +137,27 @@ test('a complete matching cache is reusable without requiring current business S
   const { directory, expected } = cacheFixture(t);
   assert.equal(validateCache(directory, expected).valid, true);
 });
+test('a cache built and tested on the previous runner is accepted with its original tool provenance', t => {
+  const { directory, expected, manifest } = cacheFixture(t);
+  const current = fingerprint({ ...expected.inputs, tools: NEW_TOOLS });
+  assert.equal(current.key, expected.key);
+  const result = validateCache(directory, current);
+  assert.equal(result.valid, true);
+  assert.deepEqual(result.manifest.buildTools, OLD_TOOLS);
+  assert.notDeepEqual(result.manifest.buildTools, current.tools);
+  assert.deepEqual(result.manifest.source, manifest.source);
+});
 for (const [name, change] of [
   ['schema mismatch', f => { f.manifest.schema++; f.save(); }],
   ['fingerprint mismatch', f => { f.manifest.fingerprint = 'b'.repeat(64); f.save(); }],
-  ['input mismatch', f => { f.manifest.inputs.tools.rustc = 'other'; f.save(); }],
+  ['input mismatch', f => { f.manifest.inputs.files['launcher.patch'] = 'other'; f.save(); }],
   ['missing tests', f => { delete f.manifest.launcherTest; f.save(); }],
   ['failed tests', f => { f.manifest.launcherTest.passed = false; f.save(); }],
   ['tests for other input', f => { f.manifest.launcherTest.fingerprint = 'c'.repeat(64); f.save(); }],
+  ['tests for other build tools', f => { f.manifest.launcherTest.buildFingerprint = 'c'.repeat(64); f.save(); }],
+  ['changed build provenance', f => { f.manifest.buildTools.node = 'other'; f.save(); }],
+  ['missing build tool provenance', f => { delete f.manifest.buildTools; f.save(); }],
+  ['incomplete build tool provenance', f => { delete f.manifest.buildTools.rustc; f.save(); }],
   ['missing provenance', f => { delete f.manifest.source; f.save(); }],
   ['missing installer', f => fs.unlinkSync(path.join(f.directory, RELEASE_FILES[0]))],
   ['empty ZIP', f => fs.writeFileSync(path.join(f.directory, RELEASE_FILES[1]), '')],
@@ -217,6 +266,7 @@ test('real pinned checkout: repeated Prepare is idempotent, stale state fails, r
   const oldRepository = process.env.GITHUB_REPOSITORY;
   const oldHit = process.env.LAUNCHER_CACHE_HIT;
   const oldForce = process.env.FORCE_LAUNCHER_REBUILD;
+  const oldImage = process.env.ImageVersion;
   try {
     process.env.GITHUB_SHA = 'b'.repeat(40);
     process.env.GITHUB_REPOSITORY = 'Nancyingcode/ok-wuthering-waves';
@@ -224,16 +274,29 @@ test('real pinned checkout: repeated Prepare is idempotent, stale state fails, r
     const data = JSON.parse(fs.readFileSync(path.join(root, 'build/launcher-metadata/fingerprint.json')));
     createManifest(root, data);
     assert.equal(validateCache(path.join(root, 'build/launcher-cache'), data).valid, true);
+    // A runner refresh may reuse complete tested artifacts, while phases of a
+    // new build must never mix tools from before and after that refresh.
+    process.env.ImageVersion = `${oldImage || 'local'}-refreshed`;
+    assert.throws(() => receipt(root, 'Test'), /current inputs and toolchain/);
+    main('fingerprint', root);
+    const refreshed = JSON.parse(fs.readFileSync(path.join(root, 'build/launcher-metadata/fingerprint.json')));
+    assert.equal(refreshed.key, data.key);
+    assert.notDeepEqual(refreshed.tools, data.tools);
     process.env.GITHUB_SHA = 'c'.repeat(40);
     process.env.LAUNCHER_CACHE_HIT = 'true';
     process.env.FORCE_LAUNCHER_REBUILD = 'false';
     main('verify', root);
     assert.equal(JSON.parse(fs.readFileSync(path.join(root, 'build/launcher-metadata/cache-result.json'))).reuse, true);
+    const restored = JSON.parse(fs.readFileSync(path.join(root, 'build/launcher-metadata/manifest.json')));
+    assert.deepEqual(restored.buildTools, data.tools);
+    assert.equal(restored.launcherTest.buildFingerprint, buildIdentity(data));
     main('stage', root);
     assert.deepEqual(fs.readdirSync(path.join(root, 'pyappify_dist')).sort(), [...RELEASE_FILES].sort());
     for (const name of RELEASE_FILES) {
       assert.deepEqual(fs.readFileSync(path.join(root, 'pyappify_dist', name)), fs.readFileSync(path.join(root, 'dist', name)));
     }
+    if (oldImage === undefined) delete process.env.ImageVersion; else process.env.ImageVersion = oldImage;
+    main('fingerprint', root);
     fs.appendFileSync(path.join(root, 'build/launcher-cache', RELEASE_FILES[0]), 'corrupt');
     main('verify', root);
     assert.equal(JSON.parse(fs.readFileSync(path.join(root, 'build/launcher-metadata/cache-result.json'))).reuse, false);
@@ -254,6 +317,7 @@ test('real pinned checkout: repeated Prepare is idempotent, stale state fails, r
     if (oldRepository === undefined) delete process.env.GITHUB_REPOSITORY; else process.env.GITHUB_REPOSITORY = oldRepository;
     if (oldHit === undefined) delete process.env.LAUNCHER_CACHE_HIT; else process.env.LAUNCHER_CACHE_HIT = oldHit;
     if (oldForce === undefined) delete process.env.FORCE_LAUNCHER_REBUILD; else process.env.FORCE_LAUNCHER_REBUILD = oldForce;
+    if (oldImage === undefined) delete process.env.ImageVersion; else process.env.ImageVersion = oldImage;
   }
   fs.appendFileSync(path.join(root, 'launcher/pyappify.personal.yml'), '\n# changed\n');
   assert.throws(() => assertPrepared(root), /inputs changed/);

@@ -108,16 +108,38 @@ The launcher manages one application with Official and Personal profiles baked i
 
 先 Prepare，再恢复任何 Rust 缓存，避免准备阶段清理不完整的源码目录时删除 target。完整成品使用 `actions/cache/restore` / `save`，只接受精确 key，没有 restore-keys。未命中时继续使用 pnpm 下载缓存及 Rust 编译依赖缓存；Rust `shared-key: personal-launcher` 代替隐含的 job key，仍保留工具链、Cargo 清单和锁文件 hash，因此迁移后的第一次可能 miss。该语义见 [rust-cache 的 action 输入](https://github.com/Swatinem/rust-cache/blob/v2/action.yml)。
 
-完整 key 格式为 `personal-launcher-win-x64-v1-<sha256>`，由 `scripts/personal_launcher_cache.cjs` 生成，输入包括：
+完整 key 格式为 `personal-launcher-win-x64-v2-<sha256>`，由 `scripts/personal_launcher_cache.cjs` 生成，输入包括：
 
 - 固定 PyAppify commit、准备后的源码及锁文件内容。
-- profiles 补丁、personal YAML、两个图标、构建脚本及实际参与的辅助脚本；第一版保守纳入 build.yml。
+- profiles 补丁、personal YAML、两个图标、构建脚本及实际参与的辅助脚本；继续保守纳入 build.yml，包含其中声明的 Rust、Node、pnpm 工具选择条件。
 - release profile、默认 features、Windows x64 MSVC target，以及影响编译/打包的环境覆盖值摘要。
-- 实际 Node、pnpm、rustc、Cargo、PowerShell、OS 架构及 Runner ImageOS / ImageVersion。
+- 构建平台与架构（Windows x64）。实际 Node、pnpm、rustc、Cargo、PowerShell、MSVC、OS 小版本及 Runner ImageOS / ImageVersion 只记录来源，不再单独使已测试成品失效。
 
 输入按稳定的相对路径排序、对内容计算 SHA-256，必要文件缺失直接失败。不使用 mtime、当前业务提交/tag/分支、普通 Python 源码、requirements 或业务测试作为失效项。`force_launcher_rebuild` 也不改变指纹。不支持改变输出位置的 `CARGO_TARGET_DIR` / `CARGO_BUILD_TARGET` 或外部 `TAURI_CONFIG`；本地使用这些覆盖时需先清除后再进入缓存流程。
 
-缓存目录 `build/launcher-cache/` 仅包含安装包、ZIP、manifest.json。manifest 记录 schema、完整指纹与输入、上游 SHA、原 launcher 构建仓库/提交/run URL、launcher_profiles 通过记录，以及两个文件的字节数和 SHA-256。校验通过后才复用，跳过 pnpm 依赖恢复/install、Rust 缓存恢复/build、launcher_profiles 和 bundle；当前业务 validate 照常执行。缓存校验失败会给出原因、清理本任务独立暂存目录并重建。仅本次 Build、Test、Bundle 全成功才生成新 manifest、保存成品缓存；业务测试失败仍禁止发布。
+缓存目录 `build/launcher-cache/` 仅包含安装包、ZIP、manifest.json。manifest 记录 schema、完整指纹与输入、上游 SHA、原 launcher 构建仓库/提交/run URL、原构建的 `buildTools`、launcher_profiles 通过记录，以及两个文件的字节数和 SHA-256。测试记录同时绑定成品指纹和原工具环境摘要，工具来源缺失、被改动或与测试收据不符均拒绝复用。校验通过后才复用，跳过 pnpm 依赖恢复/install、Rust 缓存恢复/build、launcher_profiles 和 bundle；当前业务 validate 照常执行。缓存校验失败会给出原因、清理本任务独立暂存目录并重建。仅本次 Build、Test、Bundle 全成功才生成新 manifest、保存成品缓存；业务测试失败仍禁止发布。
+
+成品复用与一次构建的阶段收据使用不同的判定：成品要求相同源码、构建配方、目标和环境覆盖，允许使用另一 Runner 已通过测试的二进制；本次新构建的 Build → Test → Bundle 收据仍绑定全部实际工具版本，同一次构建中换工具必须重新执行前面的阶段。`fingerprint.json` / report 的 `tools` 记录当前 Runner，manifest 的 `buildTools` / report 的 `launcherBuildTools` 保留实际产物来源，不会在命中时改写为当前 Runner。
+
+v2 与旧 v1 缓存隔离，首次需要完整构建。回归覆盖实际出现过的 `20261021.278.1` → `20261030.294.1` 工具版本变化，并在真实固定版本源码的集成用例中切换 ImageVersion，验证 key 不变、原测试与哈希仍可核对，同时旧构建阶段收据被拒绝。
+
+v2 已在独立分支 `feat/personal/launcher-cache-policy` 的代码提交 `aaf0e10` 上完成两次完整手动 CI：
+
+| 样本 | 整体耗时 | personal package | 全部 Python 验证 | 成品缓存 |
+| --- | ---: | ---: | ---: | --- |
+| [首次构建 / 41384839758](https://github.com/Nancyingcode/ok-wuthering-waves/actions/runs/41384839758) | 8m55s | 521s | 165s | v2 miss；Rust / pnpm hit；6 项真实 launcher_profiles 通过后保存 |
+| [精确命中 / 41385591910](https://github.com/Nancyingcode/ok-wuthering-waves/actions/runs/41385591910) | 3m11s | 108s | 172s | manifest 与两项产物校验通过；跳过依赖恢复、编译、profiles 测试编译、打包及保存 |
+
+命中样本比首次建立缓存的整体等待时间减少 344s（64.3%），personal package 减少 413s（79.3%）；这反映完整构建与成品命中路径的差别，首次格式迁移仍需要构建。两次都使用 `20261030.294.1` 镜像，因此实际 CI 证明精确恢复及成品一致性；跨镜像稳定性由使用真实版本记录的回归和切换 ImageVersion 的真实源码集成用例证明，不能将这两次 CI 写成实际跨镜像命中。
+
+两次均执行全部 63 个 Python 模块 / 952 项测试，零跳过；逐项核对发布 `v1.0.3` 的测试文件内容与测试数均未变化，分片完整且不重复。构建/发布工具回归为 108 项（107 通过，唯一的真实源码集成用例在通用 validate 中按原规则跳过，并在 package 的 40 项专门检查中执行通过）。发布工作流、条件和失败门禁未修改，两次 Publish 均 skipped，没有创建标签或 Release。
+
+两次 key 均为 `personal-launcher-win-x64-v2-f307bc69599daeba6a996c00483bed3be2b157f20c3e2ca06dcc08beebe98f00`；命中时保留首次运行的来源、工具记录和测试收据，独立下载的原始产物字节一致：
+
+| 文件 | 字节数 | SHA-256 |
+| --- | ---: | --- |
+| `ok-ww-personal-win32-setup.exe` | 4,018,375 | `fce7678864a7719f6699ca3a63a076ad06fec6bc1aced6e263c05c50d611509f` |
+| `ok-ww-personal-win32.zip` | 5,109,950 | `59027018ba205882e35eeaa87fa4607b84e45c3ca7c78b2277a87a35af493683` |
 
 EXE/ZIP 上传继续使用 `compression-level: 0`。输入、manifest 和计时信息单独上传为 `launcher-build-metadata`，不会进入 release-assets。`report_personal` 在验证/构建结束（包括缓存保存 post-action）后采集各 job / action 的实际时间，单独上传 `launcher-run-timings`；GitHub run 页面提供完整工作流墙钟时间。脚本分别记录 Prepare、install、TypeScript/Vite、Rust 正式构建、测试编译/执行、NSIS、ZIP 等阶段耗时；Rust 阶段包含编译和链接，不能把日志空白视作链接耗时。
 
@@ -127,9 +149,9 @@ EXE/ZIP 上传继续使用 `compression-level: 0`。输入、manifest 和计时�
 2. 需要热依赖重建时勾选 `force_launcher_rebuild=true`：跳过成品恢复，保留 Rust/pnpm 缓存，不删除远端缓存或覆盖同 key。
 3. 合入默认分支 `personal` 后，选择 **personal** 手动运行一次建立共享缓存，再运行一次观察成品命中。开发分支缓存不等于默认分支预热。手动构建不创建 tag 或 Release。
 4. 成功运行的 release-assets 可按下节 **Publish Existing Build** 补发，版本标签始终绑定所选业务构建 run 的 head_sha。
-5. 缓存损坏时先用强制重建绕过；远端 key 不可覆盖，维护时递增辅助脚本的 `SCHEMA`（同时使准备状态失效），在 personal 上重新预热。不自动删除远端缓存、不添加随机 key。
+5. 缓存损坏时先用强制重建绕过；远端 key 不可覆盖，维护时递增辅助脚本的 `SCHEMA`（同时使准备状态失效），在 personal 上重新预热。不自动删除远端缓存、不添加随机 key。需要将编译器或打包工具的安全修复永久纳入成品时，更新构建配方中的版本选择条件或递增 `SCHEMA`；单次 force 不会替换已有的同 key 成品。
 
-GitHub 缓存按 ref 隔离；不同 tag 之间不能直接互读，但可以读取默认分支的精确缓存，见 [GitHub 缓存访问限制](https://docs.github.com/en/actions/reference/workflows-and-actions/dependency-caching#restrictions-for-accessing-a-cache)。跨 tag 行为需要后续正常发布运行观察，本轮不为性能验证创建版本。Runner 镜像或实际工具版本变化会正常失效。
+GitHub 缓存按 ref 隔离；不同 tag 之间不能直接互读，但可以读取默认分支的精确缓存，见 [GitHub 缓存访问限制](https://docs.github.com/en/actions/reference/workflows-and-actions/dependency-caching#restrictions-for-accessing-a-cache)。跨 tag 行为需要后续正常发布运行观察，本轮不为性能验证创建版本。v2 允许默认分支预热的同配方成品跨 Runner 常规更新复用，保留精确 key、原测试收据和文件校验，不使用模糊匹配。
 
 本地完整构建始终可直接运行 All，不依赖远端成品缓存。要检查成品缓存流程，可以在相同环境依次执行（先完成 Prepare / All）：
 
@@ -179,7 +201,7 @@ CI 保留 Python 全量验证及现有 6 项 launcher_profiles 测试；只有�
 | `ok-ww-personal-win32-setup.exe` | 4,016,566 | `ca8839ae811b944c7e169618de6c4a8f05b99af11485d5d64d3b23b667fe835e` |
 | `ok-ww-personal-win32.zip` | 5,109,951 | `d6494715753f31521d84e3858af5c226412ab00963e459289c37b212bc8230c4` |
 
-两次连续手动运行可能遇到 Runner 滚动换版，不能只按提交相同就认定必须命中。#5 的真实失效原因是工具链变化；测试准备步骤中模拟的损坏缓存日志属于回归用例，应与实际 Verify complete launcher cache 步骤区分。将来分配到未预热的 `20261030.294.1` 镜像时，仍会正常重建并保存该镜像对应的独立 key。默认 `vswhere` 查询会漏掉 Build Tools，工具链指纹使用 `-products * -prerelease -requires ...VC.Tools.x86.x64` 获取实际安装版本。
+以上 #4–#6 使用旧 v1 策略，#5 的真实失效原因是工具链变化。v2 已将这些实际版本移到来源记录；源码、配方、目标和环境覆盖相同即可复用已测试成品。测试准备步骤中模拟的损坏缓存日志属于回归用例，应与实际 Verify complete launcher cache 步骤区分。默认 `vswhere` 查询会漏掉 Build Tools，工具来源记录使用 `-products * -prerelease -requires ...VC.Tools.x86.x64` 获取实际安装版本。
 
 安装/来源切换交互、强制重建的完整依赖热构建及跨 tag 访问尚未实测；跨 tag 验证留待正常发布观察，不为性能测试创建 tag 或 Release。上述测量中 job 和子阶段存在包含关系，整体时间使用 run 起止时间，不能相加。
 
