@@ -83,7 +83,7 @@ class ChangeEchoTask(BaseWWTask, FindFeature):
             target = self.wait_ocr(match=re.compile(target_main), raise_if_not_found=True)
             self.sleep(0.1)
             self.click(target, after_sleep=0.5)
-            self.wait_click_ocr(match='确认', after_sleep=2)
+            self.wait_click_ocr(0.5, 0.5, 0.85, 0.85, match='确认', after_sleep=2)
             self.wait_click_ocr(0.37, 0.82, 0.64, 0.99, match='数据重构', after_sleep=0.5, raise_if_not_found=True)
             self.wait_ocr(match='获得声骸', raise_if_not_found=True)
             self.esc()

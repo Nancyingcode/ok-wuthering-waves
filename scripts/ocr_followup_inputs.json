@@ -1,0 +1,9 @@
+[
+  {"path": "tests/images/tacet_elimination_final.jpg", "label": "tacet.board.bottom_500", "roi": [0.3, 0.6, 0.7, 0.96], "expected": [{"text": "500", "region": [0, 0.8, 0.3, 1]}]},
+  {"path": "tests/images/tacet_elimination_board.jpg", "label": "tacet.board.empty_roi", "roi": [0, 0.15, 0.4, 0.23], "expected_empty": true},
+  {"path": "tests/images/echo_enhance.png", "label": "echo.title", "roi": [0, 0, 0.45, 0.18], "expected": [{"text": "声骸", "contains": true, "region": [0, 0, 0.7, 0.8]}]},
+  {"path": "tests/images/find_confirm.png", "label": "confirm", "roi": [0.2, 0.5, 0.8, 0.95], "expected": [{"text": "确认", "region": [0, 0, 1, 1]}]},
+  {"path": "ok_templates/9.png", "label": "story.long_chinese", "roi": [0.28, 0.28, 0.73, 0.7], "expected": [{"text": "剧情梗概", "region": [0.3, 0, 0.7, 0.3]}, {"text": "继续观看", "region": [0, 0.7, 0.5, 1]}]},
+  {"path": "tests/images/find_add_mat.png", "label": "echo.dense_stats", "roi": [0, 0.02, 0.38, 0.96], "expected": [{"text": "共鸣解放伤害加成", "region": [0.2, 0.2, 0.9, 0.55]}]},
+  {"path": "ok_templates/13.png", "label": "message.mixed_long", "roi": [0.2, 0.25, 0.82, 0.77], "expected": [{"text": "会话已建立", "region": [0.3, 0, 0.7, 0.2]}, {"text": "未知联系人", "region": [0, 0.25, 0.4, 0.5]}]}
+]

@@ -175,9 +175,20 @@ config = {
     'ocr': {
         'lib': 'onnxocr',
         'auto_simplify': True,
+        'preload': True,
+        'lifecycle': {
+            'idle_policy': 'executor_idle',
+            'idle_seconds': 60,
+            'max_calls': 128,
+            'max_age_seconds': 300,
+            'process_growth_mib': 512,
+        },
         'params': {
             'use_openvino': True,
             'use_npu': True,
+            'rec_batch_num': 6,
+            'openvino_num_requests': 1,
+            'openvino_compile_config': {'CPU': {}, 'NPU': {}},
         }
     },
     'plugin':True,

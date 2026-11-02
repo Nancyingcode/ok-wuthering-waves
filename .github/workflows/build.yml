@@ -78,7 +78,14 @@ jobs:
         if: github.event_name == 'push'
         env:
           RELEASE_TAG: ${{ github.ref_name }}
-        run: python -m ok.update.inline_ok_requirements --tag "$env:RELEASE_TAG"
+        run: |
+          python scripts/build_ocr_wheels.py --download
+          if ($LASTEXITCODE -ne 0) { throw 'Patched OCR wheel build failed' }
+          python -m pip install --no-deps --force-reinstall build/ocr-wheels/patched/ok_script-2.0.22+okww.ocr1-py3-none-any.whl build/ocr-wheels/patched/onnxocr_ppocrv5-0.0.22+okww.ocr1-py3-none-any.whl
+          if ($LASTEXITCODE -ne 0) { throw 'Patched OCR dependency installation failed' }
+          python -m pip check
+          if ($LASTEXITCODE -ne 0) { throw 'Patched OCR dependency check failed' }
+          python scripts/prepare_ocr_release.py --tag "$env:RELEASE_TAG"
 
       - name: Run tests
         timeout-minutes: 20
@@ -169,7 +176,14 @@ jobs:
         if: github.repository == 'ok-oldking/ok-wuthering-waves' && github.event_name == 'push'
         env:
           RELEASE_TAG: ${{ github.ref_name }}
-        run: python -m ok.update.inline_ok_requirements --tag "$env:RELEASE_TAG"
+        run: |
+          python scripts/build_ocr_wheels.py --download
+          if ($LASTEXITCODE -ne 0) { throw 'Patched OCR wheel build failed' }
+          python -m pip install --no-deps --force-reinstall build/ocr-wheels/patched/ok_script-2.0.22+okww.ocr1-py3-none-any.whl build/ocr-wheels/patched/onnxocr_ppocrv5-0.0.22+okww.ocr1-py3-none-any.whl
+          if ($LASTEXITCODE -ne 0) { throw 'Patched OCR dependency installation failed' }
+          python -m pip check
+          if ($LASTEXITCODE -ne 0) { throw 'Patched OCR dependency check failed' }
+          python scripts/prepare_ocr_release.py --tag "$env:RELEASE_TAG"
 
       - name: Check release version
         id: release_version
@@ -243,7 +257,14 @@ jobs:
         if: github.repository == 'ok-oldking/ok-wuthering-waves' && github.event_name == 'push'
         env:
           RELEASE_TAG: ${{ github.ref_name }}
-        run: python -m ok.update.inline_ok_requirements --tag "$env:RELEASE_TAG"
+        run: |
+          python scripts/build_ocr_wheels.py --download
+          if ($LASTEXITCODE -ne 0) { throw 'Patched OCR wheel build failed' }
+          python -m pip install --no-deps --force-reinstall build/ocr-wheels/patched/ok_script-2.0.22+okww.ocr1-py3-none-any.whl build/ocr-wheels/patched/onnxocr_ppocrv5-0.0.22+okww.ocr1-py3-none-any.whl
+          if ($LASTEXITCODE -ne 0) { throw 'Patched OCR dependency installation failed' }
+          python -m pip check
+          if ($LASTEXITCODE -ne 0) { throw 'Patched OCR dependency check failed' }
+          python scripts/prepare_ocr_release.py --tag "$env:RELEASE_TAG"
 
       - name: Reuse base executable
         id: reuse_executable

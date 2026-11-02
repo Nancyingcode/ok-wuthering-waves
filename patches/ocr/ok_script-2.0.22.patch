@@ -1,0 +1,46 @@
+--- a/ok/task/TaskExecutor.py
++++ b/ok/task/TaskExecutor.py
+@@ -48,6 +48,7 @@
+ 
+ 
+ class TaskExecutor:
++    ocr_params_passthrough = True
+     _frame: object
+     paused: bool
+     pause_start: float
+@@ -192,7 +192,7 @@
+         if not ocr_config:
+             return
+         default_ocr = ocr_config.get('default')
+-        if not default_ocr or not default_ocr.get('lib'):
++        if not default_ocr or not default_ocr.get('lib') or not default_ocr.get('preload', True):
+             return
+         self._ocr_init_thread = threading.Thread(target=self._init_default_ocr, name="DefaultOCRInit", daemon=True)
+         self._ocr_init_thread.start()
+@@ -201,7 +201,9 @@
+         start = time.time()
+         try:
+             logger.info('start init default ocr')
+-            self.ocr_lib()
++            instance = self.ocr_lib()
++            if hasattr(instance, "prepare"):
++                instance.prepare()
+             logger.info(f'default ocr init end, cost: {time.time() - start:.2f}s')
+         except Exception as e:
+             logger.error(f'init default ocr error, cost: {time.time() - start:.2f}s', e)
+@@ -240,10 +242,11 @@
+         elif lib == 'onnxocr':
+             from onnxocr.onnx_paddleocr import ONNXPaddleOcr
+             logger.info(f'init onnxocr {config_params}')
+-            ocr_lib = ONNXPaddleOcr(use_angle_cls=False,
+-                                    logger=logger,
+-                                    use_npu=config_params.get('use_npu', True),
+-                                    use_openvino=config_params.get('use_openvino', False))
++            config_params.setdefault('use_angle_cls', False)
++            config_params.setdefault('use_npu', True)
++            config_params.setdefault('use_openvino', False)
++            config_params['logger'] = logger
++            ocr_lib = ONNXPaddleOcr(**config_params)
+         elif lib == 'rapidocr':
+             from rapidocr import RapidOCR
+             params = {"Global.use_cls": False, "Global.max_side_len": 100000, "Global.min_side_len": 0,

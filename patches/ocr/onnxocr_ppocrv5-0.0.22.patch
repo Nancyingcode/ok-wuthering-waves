@@ -1,0 +1,202 @@
+--- a/onnxocr/openvino_config.py
++++ b/onnxocr/openvino_config.py
+@@ -0,0 +1,41 @@
++"""Strict, device-specific OpenVINO configuration; no silent property fallback."""
++
++from copy import deepcopy
++
++
++class OpenVINOConfigError(ValueError):
++    pass
++
++
++def compile_configs(value):
++    if value is None:
++        return {}
++    if not isinstance(value, dict) or set(value) - {'CPU', 'NPU'}:
++        raise OpenVINOConfigError('openvino_compile_config expects CPU/NPU dictionaries')
++    for device, properties in value.items():
++        if not isinstance(properties, dict):
++            raise OpenVINOConfigError(f'{device} compile config must be a dictionary')
++        for key, option in properties.items():
++            if not isinstance(key, str) or not key:
++                raise OpenVINOConfigError('Compile property keys must be nonempty strings')
++            if key == 'CPU_RUNTIME_CACHE_CAPACITY':
++                if device != 'CPU' or type(option) is not int or option < 0:
++                    raise OpenVINOConfigError('CPU_RUNTIME_CACHE_CAPACITY requires a nonnegative CPU integer')
++    return deepcopy(value)
++
++
++def validate_params(params, defaults):
++    unknown = set(params) - set(defaults) - {'openvino_compile_config'}
++    if unknown:
++        raise ValueError(f'Unknown OCR parameters: {sorted(unknown)}')
++    for key, value in params.items():
++        if key == 'openvino_compile_config':
++            compile_configs(value)
++            continue
++        default = defaults.get(key)
++        if default is not None and type(value) is not type(default):
++            raise ValueError(f'OCR parameter {key} expects {type(default).__name__}')
++    for key in ('rec_batch_num', 'cls_batch_num', 'openvino_num_requests'):
++        value = params.get(key, defaults.get(key, 1))
++        if type(value) is not int or value <= 0:
++            raise ValueError(f'{key} must be a positive integer')
+--- a/onnxocr/predict_det.py
++++ b/onnxocr/predict_det.py
+@@ -13,6 +13,7 @@
+             getattr(args, "logger", None),
+             getattr(args, "force_static_shape", False),
+             getattr(args, "openvino_num_requests", 1),
++            getattr(args, "openvino_compile_config", None),
+         )
+         self.args = args
+         self.det_algorithm = args.det_algorithm
+--- a/onnxocr/predict_rec.py
++++ b/onnxocr/predict_rec.py
+@@ -17,6 +17,7 @@
+             getattr(args, "logger", None),
+             getattr(args, "force_static_shape", False),
+             getattr(args, "openvino_num_requests", 1),
++            getattr(args, "openvino_compile_config", None),
+         )
+         self.rec_image_shape = [int(v) for v in args.rec_image_shape.split(",")]
+         self.rec_batch_num = args.rec_batch_num
+--- a/onnxocr/predict_cls.py
++++ b/onnxocr/predict_cls.py
+@@ -16,6 +16,7 @@
+             getattr(args, "logger", None),
+             getattr(args, "force_static_shape", False),
+             getattr(args, "openvino_num_requests", 1),
++            getattr(args, "openvino_compile_config", None),
+         )
+         self.cls_image_shape = [int(v) for v in args.cls_image_shape.split(",")]
+         self.cls_batch_num = args.cls_batch_num
+--- a/onnxocr/onnx_paddleocr.py
++++ b/onnxocr/onnx_paddleocr.py
+@@ -2,6 +2,7 @@
+ import time
+ 
+ from .predict_system import TextSystem
++from .openvino_config import OpenVINOConfigError, validate_params
+ from .utils import infer_args as init_args
+ from .utils import str2bool, draw_ocr
+ import argparse
+@@ -33,6 +34,7 @@
+         params.rec_image_shape = "3, 48, 320"
+ 
+         # 根据传入的参数覆盖更新默认参数
++        validate_params(kwargs, inference_args_dict)
+         params.__dict__.update(**kwargs)
+ 
+         # Pass logger through params for sub-components
+@@ -54,6 +56,8 @@
+                 self._initialize_models(params)
+                 test_result = self.ocr(test_frame)
+                 init_result = f'use_npu=True, test_ocr={test_result!r}'
++            except OpenVINOConfigError:
++                raise
+             except Exception as error:
+                 logger.warning(
+                     f'NPU OCR test failed, falling back to CPU: {error}'
+--- a/onnxocr/predict_base.py
++++ b/onnxocr/predict_base.py
+@@ -5,6 +5,8 @@
+ 
+ import numpy as np
+ import cv2
++
++from .openvino_config import OpenVINOConfigError, compile_configs
+ 
+ 
+ def _model_cache_path(model_dir, backend, suffix):
+@@ -33,7 +35,12 @@
+         logger=None,
+         force_static_shape=False,
+         openvino_num_requests=1,
++        openvino_compile_config=None,
+     ):
++        device_configs = compile_configs(openvino_compile_config)
++        self.compile_diagnostics = []
++        self.requested_device = 'NPU' if use_npu else 'CPU'
++        self.device_fallback_reason = None
+         self.is_openvino = use_openvino
+         if logger is None:
+             logger = logging.getLogger('onnxocr')
+@@ -65,6 +72,8 @@
+                     npu_devices = []
+                     logger.info(f'openvino npu unavailable: {exc}')
+ 
++                if not npu_devices:
++                    self.device_fallback_reason = 'NPU unavailable'
+                 if npu_devices:
+                     from .check_npu import check_npu_driver_valid
+                     npu_driver_valid = check_npu_driver_valid(logger)
+@@ -72,6 +81,8 @@
+                     if npu_driver_valid:
+                         preferred_devices.append("NPU")
+                         logger.info('openvino use npu')
++                    else:
++                        self.device_fallback_reason = 'NPU driver invalid'
+ 
+             preferred_devices.append("CPU")
+             logger.info(
+@@ -112,13 +123,38 @@
+                         except Exception:
+                             pass
+                     
+-                    self.session = core.compile_model(model=model, device_name=device)
++                    config = dict(device_configs.get(device, {}))
++                    diagnostic = {'requested_device': self.requested_device, 'compile_device': device,
++                                  'fallback_reason': self.device_fallback_reason, 'config': dict(config)}
++                    self.compile_diagnostics.append(diagnostic)
++                    try:
++                        self.session = core.compile_model(model=model, device_name=device, config=config)
++                    except Exception as error:
++                        diagnostic.update(status='rejected', error=str(error))
++                        logger.warning(f'openvino compile rejected: {diagnostic}')
++                        if config:
++                            # A configured experiment must fail rather than silently drop its treatment.
++                            raise OpenVINOConfigError(f'{device} compile config rejected: {error}') from error
++                        raise
++                    diagnostic.update(status='accepted', actual_device=device, properties={})
++                    for key in ('EXECUTION_DEVICES', 'NUM_STREAMS', 'INFERENCE_NUM_THREADS',
++                                'PERFORMANCE_HINT', *config):
++                        try:
++                            value = self.session.get_property(key)
++                            diagnostic['properties'][key] = {'value': str(value), 'readable': True}
++                        except Exception as error:
++                            diagnostic['properties'][key] = {'value': None, 'readable': False,
++                                                             'error': str(error)}
++                    logger.info(f'openvino compile accepted: {diagnostic}')
+                     self.model_dir = model_dir # Store for identifying model type in run()
+                     if device == "NPU":
+                         self.is_npu = True
+                     break
++                except OpenVINOConfigError:
++                    raise
+                 except Exception as e:
+                     self.force_shape = None
++                    self.device_fallback_reason = str(e)
+                     if device == preferred_devices[-1]: raise e
+                     self.logger.warning(f"Failed to compile model on {device}: {e}. Trying next...")
+ 
+@@ -200,11 +236,15 @@
+             )
+ 
+         job["done"].wait()
+-        if job["error"] is not None:
++        # The native queue retains its last userdata after completion. Transfer
++        # ownership only after the callback's final write (done.set()).
++        error = job.pop("error", None)
++        outputs = job.pop("outputs", None)
++        if error is not None:
+             raise RuntimeError(
+                 "OpenVINO asynchronous inference failed"
+-            ) from job["error"]
+-        return job["outputs"]
++            ) from error
++        return outputs
+ 
+     def run(self, output_name, input_feed):
+         if self.is_openvino:
