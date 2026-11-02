@@ -33,6 +33,7 @@ class TestOcrMemory(unittest.TestCase):
         self.memory = self.enterContext(patch('src.ocr_memory._private_memory', return_value=0))
         self.enterContext(patch.object(TaskExecutor, 'load_tr'))
         self.enterContext(patch.object(TaskExecutor, 'init_default_ocr'))
+        self.enterContext(patch('src.ocr_memory._start_startup_ocr_monitor', lambda executor: None))
         self.models = []
         self.executor = self.make_executor()
 
@@ -596,6 +597,142 @@ class TestOcrMemory(unittest.TestCase):
             install_ocr_idle_release()
         self.assertTrue(native._okww_managed_ocr)
         self.assertIs(native._release_idle_ocr, ocr_memory._release_idle_ocr)
+
+
+class TestStartupOcrMemory(unittest.TestCase):
+    def setUp(self):
+        install_ocr_idle_release()
+        self.clock = self.enterContext(patch('src.ocr_memory.time.monotonic', return_value=100.0))
+        self.enterContext(patch('src.ocr_memory._private_memory', return_value=0))
+        self.enterContext(patch.object(TaskExecutor, 'load_tr'))
+        self.enterContext(patch.object(TaskExecutor, 'init_default_ocr'))
+        self.exit_event = threading.Event()
+        self.executor = TaskExecutor(
+            SimpleNamespace(interaction=None), exit_event=self.exit_event,
+            global_config=Mock(), config={'ocr': {
+                'lib': 'onnxocr', 'params': {'use_openvino': True},
+            }})
+        self.models = []
+
+        def create_model(name):
+            model = Model()
+            self.models.append(weakref.ref(model))
+            return model
+
+        self.executor._create_ocr_lib = Mock(side_effect=create_model)
+        self.addCleanup(self.stop_monitor)
+
+    def stop_monitor(self):
+        self.exit_event.set()
+        if self.executor is not None:
+            self.executor._wake_executor()
+            thread = getattr(self.executor, '_ocr_idle_thread', None)
+            if thread is not None:
+                thread.join(5)
+                self.assertFalse(thread.is_alive())
+            if self.executor.thread is not None:
+                self.executor.thread.join(5)
+                self.assertFalse(self.executor.thread.is_alive())
+
+    def run_startup(self, steps):
+        observations = []
+        steps = iter(steps)
+
+        def advance_idle(timeout):
+            observations.append((self.clock.return_value, self.models[-1]() is not None))
+            step = next(steps, None)
+            if step is None:
+                return True
+            now, action = step
+            self.clock.return_value = now
+            if action is not None:
+                action()
+            return False
+
+        with patch.object(self.exit_event, 'wait', side_effect=advance_idle):
+            self.executor._init_default_ocr()
+            thread = getattr(self.executor, '_ocr_idle_thread', None)
+            if thread is not None:
+                thread.join(5)
+                self.assertFalse(thread.is_alive())
+        return observations
+
+    def test_startup_idle_releases_at_sixty_seconds_without_running_tasks(self):
+        observations = self.run_startup([(159.999, None), (160, None)])
+        self.assertEqual(observations, [(100, True), (159.999, True), (160, False)])
+        self.assertIsNone(self.models[-1]())
+        self.assertIsNone(self.executor.thread)
+        self.assertTrue(self.executor.paused)
+        self.assertIsNone(self.executor.current_job)
+        self.assertIsNone(self.executor.current_task)
+
+    def test_startup_ocr_use_delays_release_and_cached_proxy_reloads(self):
+        notification = NotificationPPOCR(self.executor.ocr_lib)
+        expected = []
+
+        def recognize():
+            expected.extend(notification.recognize('notification'))
+
+        observations = self.run_startup([(150, recognize), (160, None), (209.999, None), (210, None)])
+        self.assertEqual(observations, [(100, True), (150, True), (160, True),
+                                        (209.999, True), (210, False)])
+        proxy = self.executor._ocr_lib['default']
+        self.assertIsNone(proxy._model)
+        self.assertEqual(notification.recognize('after release'), expected)
+        self.assertIs(notification._instance, proxy)
+        self.assertEqual(self.executor._create_ocr_lib.call_count, 2)
+
+    def test_startup_monitor_stops_on_shutdown_without_releasing_early(self):
+        observations = self.run_startup([(130, self.exit_event.set)])
+        self.assertEqual(observations, [(100, True)])
+        self.assertIsNotNone(self.models[-1]())
+        self.assertIsNone(self.executor.thread)
+
+    def test_startup_monitor_hands_over_to_scheduler_on_first_job(self):
+        jobs = []
+
+        def submit_job():
+            jobs.append(self.executor.submit(lambda: 42))
+
+        observations = self.run_startup([(130, submit_job)])
+        self.assertEqual(observations, [(100, True)])
+        self.assertEqual(jobs[0].future.result(5), 42)
+        self.assertTrue(self.executor.thread.is_alive())
+        self.assertTrue(self.executor.paused)
+        self.assertIsNotNone(self.models[-1]())
+
+    def test_cached_ocr_access_keeps_one_startup_monitor(self):
+        threads = []
+
+        def use_cached_ocr():
+            threads.append(self.executor._ocr_idle_thread)
+            self.executor.ocr_lib()
+            threads.append(self.executor._ocr_idle_thread)
+
+        observations = self.run_startup([(150, use_cached_ocr), (210, None)])
+        self.assertEqual(observations, [(100, True), (150, True), (210, False)])
+        self.assertIs(threads[0], threads[1])
+
+    def test_startup_monitor_does_not_keep_executor_alive_while_waiting(self):
+        waiting = threading.Event()
+        finish = threading.Event()
+        self.addCleanup(finish.set)
+
+        def wait(timeout):
+            waiting.set()
+            return finish.wait(5)
+
+        with patch.object(self.exit_event, 'wait', side_effect=wait):
+            self.executor._init_default_ocr()
+            thread = self.executor._ocr_idle_thread
+            self.assertTrue(waiting.wait(5))
+            reference = weakref.ref(self.executor)
+            self.executor = None
+            gc.collect()
+            self.assertIsNone(reference())
+            finish.set()
+            thread.join(5)
+            self.assertFalse(thread.is_alive())
 
 
 if __name__ == '__main__':

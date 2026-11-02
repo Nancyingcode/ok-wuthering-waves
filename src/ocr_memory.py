@@ -202,7 +202,33 @@ def _ocr_lib(self, name="default"):
         instance = self._ocr_lib[name]
     if isinstance(instance, ManagedOCR):
         instance.prepare()
+        _start_startup_ocr_monitor(self)
     return instance
+
+
+def _monitor_startup_ocr(executor_ref, exit_event):
+    while not exit_event.is_set():
+        executor = executor_ref()
+        if executor is None or executor.thread is not None:
+            return
+        executor._release_idle_ocr()
+        # Waiting must not keep an otherwise unused executor alive.
+        executor = None
+        if exit_event.wait(1):
+            return
+
+
+def _start_startup_ocr_monitor(executor):
+    # GUI warmup runs before the lazy scheduler. Cover that interval without
+    # starting task execution; the scheduler owns idle checks once it starts.
+    with executor._ocr_lib_lock:
+        if executor.thread is not None or getattr(executor, '_ocr_idle_thread', None) is not None:
+            return
+        thread = threading.Thread(
+            target=_monitor_startup_ocr, args=(weakref.ref(executor), executor.exit_event),
+            name='OCRIdleRelease', daemon=True)
+        executor._ocr_idle_thread = thread
+    thread.start()
 
 
 def _release_idle_ocr(self):
