@@ -69,6 +69,21 @@ class TestOcrBenchmark(unittest.TestCase):
         self.assertEqual([row['pure_unloaded'] for row in result['release_tails']], [True, False])
         self.assertEqual([row['latest_created_at'] for row in result['release_tails']], [10, 20])
         self.assertEqual([row['released_model_created_at'] for row in result['release_tails']], [10, 10])
+        self.assertEqual([row['interval_validity'] for row in result['release_tails']], ['unknown', 'unknown'])
+        self.assertIsNone(result['completed'])
+
+    def test_versioned_summary_uses_full_interval_instead_of_final_unloaded_boolean(self):
+        row = {'event': 'release_tail', 'elapsed': 1, 'phase': 'cooldown',
+               'diagnostic_schema_version': 2, 'state_after': {'generation': 2, 'loaded': False},
+               'valid_for_unloaded': False, 'invalid_reason': 'epoch_changed',
+               'target_seconds': 2, 'release_generation': 1, 'lateness_seconds': .01}
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / 'trace.jsonl'
+            path.write_text(json.dumps(row), encoding='utf-8')
+            result = summarize_lifecycle(path, Path(directory) / 'summary')
+        self.assertFalse(result['completed'])
+        self.assertFalse(result['release_tails'][0]['pure_unloaded'])
+        self.assertEqual(result['release_tails'][0]['generation'], 2)
 
     def test_missing_private_memory_is_not_replaced_by_working_set(self):
         with patch('psutil.Process', return_value=SimpleNamespace(memory_info=lambda: SimpleNamespace(rss=123))):

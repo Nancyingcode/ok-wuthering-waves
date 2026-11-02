@@ -7,7 +7,6 @@ import json
 import logging
 import os
 from pathlib import Path
-import queue
 import sys
 import threading
 import time
@@ -65,20 +64,28 @@ def natural_protocol(args):
     if args.config:
         options = json.loads(args.config.read_text(encoding='utf-8'))
     trace = Recorder(args.output)
-    events = queue.Queue(maxsize=4096)
-    observer_stop = threading.Event()
     exit_event = threading.Event()
     executor = None
     original_infer = PredictBase._run_openvino_async
     original_factory = TaskExecutor._create_ocr_lib
     call_context = {}
-    target_captured = threading.Event()
-    growth_seen = threading.Event()
-    first_unloaded_private = None
-    categories_taken = set()
+    count = 0
     factory_generations = {}
     if args.diagnostics:
         from ocr_diagnostics import object_states, virtual_memory_categories, watch_model
+    from scripts.ocr_observer import BoundaryObserver, SCHEMA_VERSION, complete_recording, observed_run
+
+    def scalar_state():
+        if executor is None:
+            return {}
+        with executor._ocr_lib_lock:
+            proxy = executor._ocr_lib.get('default')
+        return proxy.diagnostic_state() if proxy is not None else {}
+
+    observer = BoundaryObserver(scalar_state, lambda: memory(os.getpid()),
+                                virtual_memory_categories if args.diagnostics else lambda: {}, trace.emit,
+                                object_states if args.diagnostics else lambda generation: [],
+                                diagnostics=args.diagnostics)
 
     def factory(owner, name):
         model = original_factory(owner, name)
@@ -88,16 +95,11 @@ def natural_protocol(args):
         return model
 
     class LifecycleLog(logging.Handler):
-        dropped = 0
-
         def emit(self, record):
             message = record.getMessage()
             for marker, kind in [('OCR_LIFECYCLE ', 'lifecycle'), ('OCR_DIAGNOSTIC ', 'diagnostic')]:
                 if marker in message:
-                    try:
-                        events.put_nowait((kind, json.loads(message.split(marker, 1)[1])))
-                    except queue.Full:
-                        self.dropped += 1
+                    observer.publish(kind, json.loads(message.split(marker, 1)[1]))
 
     handler = LifecycleLog()
     logging.getLogger('ok').addHandler(handler)
@@ -114,49 +116,9 @@ def natural_protocol(args):
                    seconds=time.perf_counter() - started)
         return outputs
 
-    def observe():
-        nonlocal first_unloaded_private
-        pending = []
-        while not observer_stop.is_set() or not events.empty():
-            try:
-                kind, event = events.get(timeout=.02)
-                trace.emit(kind, **{('transition' if key == 'event' else key): value
-                                    for key, value in event.items()})
-                if kind == 'lifecycle' and event['event'] == 'release_complete':
-                    if event['reason'] == 'private memory growth':
-                        growth_seen.set()
-                    pending.extend((event['monotonic'] + delay, delay, event['generation'])
-                                   for delay in (0, 2, 10, 30))
-            except queue.Empty:
-                pass
-            now = time.monotonic()
-            due = [item for item in pending if item[0] <= now]
-            pending = [item for item in pending if item[0] > now]
-            for target, delay, generation in due:
-                state = ocr_snapshot(executor)
-                usage = memory(os.getpid())
-                trace.emit('release_tail', release_generation=generation, target_seconds=delay,
-                           lateness_seconds=now - target, **usage, **state,
-                           **({'weak_objects': object_states(generation)} if args.diagnostics else {}))
-                if args.diagnostics and state['models']:
-                    current = state['models'][0]
-                    pure = not current['loaded'] and not current['recycling'] and current['active_calls'] == 0
-                    if pure and usage['private_bytes'] is not None:
-                        if first_unloaded_private is None:
-                            first_unloaded_private = usage['private_bytes']
-                        high = usage['private_bytes'] - first_unloaded_private >= 128 * 1024**2
-                        category = 'high' if high else 'first_unloaded'
-                        if category not in categories_taken and (high or not categories_taken):
-                            categories_taken.add(category)
-                            classification = virtual_memory_categories()
-                            trace.emit('memory_categories', category=category, release_generation=generation,
-                                       state_before=state, state_after=ocr_snapshot(executor),
-                                       weak_objects=object_states(generation), **classification)
-                        if high and growth_seen.is_set():
-                            target_captured.set()
-
     def wait_until(target):
         while time.monotonic() < target:
+            observer.raise_if_failed()
             if trace.stop.wait(min(.1, max(0, target - time.monotonic()))):
                 raise RuntimeError('Sampler stopped')
 
@@ -165,8 +127,9 @@ def natural_protocol(args):
             PredictBase._run_openvino_async = infer
         if args.diagnostics:
             TaskExecutor._create_ocr_lib = factory
-        with trace.sampling(1):
+        with trace.sampling(1), observed_run(trace, observer, lambda: count):
             trace.emit('environment', **environment(), protocol=args.protocol, protocol_version=1,
+                       diagnostic_schema_version=SCHEMA_VERSION,
                        options=options, limits=vars(args), model_files=model_files(options.get('params')),
                        manifest_sha256=digest(args.manifest),
                        source_sha256=digest(ROOT / 'src/ocr_memory.py'))
@@ -174,7 +137,6 @@ def natural_protocol(args):
                                     global_config=SimpleNamespace(get_config=lambda option: {}),
                                     config={'ocr': options})
             trace.snapshot = lambda: ocr_snapshot(executor)
-            observer = threading.Thread(target=observe, name='OCRBoundaryObserver', daemon=True)
             observer.start()
             if executor._ocr_init_thread is not None:
                 executor._ocr_init_thread.join(30)
@@ -194,7 +156,6 @@ def natural_protocol(args):
             proxy = executor.ocr_lib()
             proxy_id = id(proxy)
             expected = {}
-            count = 0
 
             def recognize(index, target):
                 nonlocal count
@@ -246,34 +207,34 @@ def natural_protocol(args):
                         target = origin + index * args.period
                         wait_until(target)
                         recognize(index, target)
-                        if args.stop_on_high_tail and target_captured.is_set():
+                        if args.stop_on_high_tail and observer.target_captured.is_set():
                             break
                     if args.protocol == 'continuous' and not args.diagnostics:
                         wait_until(origin + args.seconds)
                 trace.emit('load_completed', calls=count,
-                           stop_reason='growth and high unloaded tail captured' if target_captured.is_set()
+                           stop_reason='growth and high unloaded tail captured' if observer.target_captured.is_set()
                            else 'protocol bound', **ocr_snapshot(executor))
 
             submitted = executor.submit(job, name=f'OCR {args.protocol} protocol')
             submitted.future.result(timeout=args.seconds + 120)
             trace.phase = 'cooldown'
             trace.emit('cooldown_start', **ocr_snapshot(executor))
-            wait_until(time.monotonic() + args.cooldown)
-            trace.emit('completed', calls=count, **ocr_snapshot(executor))
+            deadline = time.monotonic() + args.cooldown
+            observer.set_deadline(deadline)
+            wait_until(deadline)
             exit_event.set()
             executor.thread.join(5)
             monitor = getattr(executor, '_ocr_idle_thread', None)
             if monitor is not None:
                 monitor.join(5)
-            observer_stop.set()
-            observer.join(5)
             trace.emit('shutdown', monitor_alive=monitor.is_alive() if monitor else False,
-                       executor_alive=executor.thread.is_alive(), dropped_boundary_events=handler.dropped)
-            if handler.dropped:
-                raise RuntimeError('Boundary observer overflowed; evidence is incomplete')
+                       executor_alive=executor.thread.is_alive())
+            complete_recording(trace, observer, count, deadline,
+                               producers_stopped=not executor.thread.is_alive() and not (monitor and monitor.is_alive()))
     finally:
         exit_event.set()
-        observer_stop.set()
+        if not observer.closing:
+            observer.finish(time.monotonic())
         PredictBase._run_openvino_async = original_infer
         TaskExecutor._create_ocr_lib = original_factory
         logging.getLogger('ok').removeHandler(handler)

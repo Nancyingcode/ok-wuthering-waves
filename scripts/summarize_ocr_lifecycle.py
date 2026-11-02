@@ -9,6 +9,7 @@ import sys
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from scripts.benchmark_ocr import digest, percentile
+from scripts.ocr_observer import completion_status
 
 MIB = 1024 ** 2
 
@@ -36,14 +37,20 @@ def summarize(path, output, plot=False):
             calls.append(row)
         elif row['event'] in ('sample', 'release_tail'):
             models = row.get('models', [])
-            model = models[0] if models else {}
+            model = row.get('state_after', models[0] if models else {})
             point = {key: row.get(key) for key in ('elapsed', 'phase', 'private_bytes', 'working_set_bytes')}
             point.update({key: model.get(key) for key in
                           ('generation', 'loaded', 'active_calls', 'calls', 'created_at', 'model_age_seconds')})
             if row['event'] == 'release_tail':
                 point.update({key: row[key] for key in
                               ('release_generation', 'target_seconds', 'lateness_seconds')})
-                point['pure_unloaded'] = bool(models) and not model['loaded'] and not model['recycling']
+                if row.get('diagnostic_schema_version', 0) >= 2:
+                    point['pure_unloaded'] = row.get('valid_for_unloaded') is True
+                    point['interval_validity'] = row.get('valid_for_unloaded', 'unknown')
+                    point['invalid_reason'] = row.get('invalid_reason')
+                else:
+                    point['pure_unloaded'] = bool(models) and not model['loaded'] and not model['recycling']
+                    point['interval_validity'] = 'unknown'
                 tails.append(point)
             else:
                 observations.append(point)
@@ -72,8 +79,12 @@ def summarize(path, output, plot=False):
 
     hot = [row['seconds'] for row in calls if row['before']['loaded'] and row['before']['calls'] > 0]
     generations = [generations[key] for key in sorted(generations)]
-    summary = {'file': str(path), 'sha256': digest(path),
-               'completed': any(row['event'] == 'completed' for row in rows),
+    protocol = completion_status(rows)
+    completed = None
+    if protocol['status'] != 'unknown':
+        completed = protocol['status'] == 'success'
+    summary = {'file': str(path), 'sha256': digest(path), 'diagnostic_protocol': protocol,
+               'completed': completed,
                'last_elapsed': rows[-1]['elapsed'], 'calls': len(calls),
                'hot_p50_seconds': percentile(hot, .5), 'hot_p95_seconds': percentile(hot, .95),
                'scheduling_lag_p95_seconds': percentile([row['scheduling_lag_seconds'] for row in calls], .95),

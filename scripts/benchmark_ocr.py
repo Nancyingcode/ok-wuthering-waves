@@ -150,11 +150,13 @@ def replay(args):
     failed_expectations = 0
     trace.snapshot = lambda: {'model_loaded': model_ref[0] is not None, 'generation': generation}
     original = PredictBase._run_openvino_async
+    call_context = {}
 
     def infer(predictor, feed):
         started = time.perf_counter()
         outputs = original(predictor, feed)
         trace.emit('native_inference', model=Path(predictor.model_dir).stem,
+                   **call_context,
                    device='NPU' if predictor.is_npu else 'CPU',
                    shapes=[list(value.shape) for value in feed.values()],
                    output_nbytes=sum(value.nbytes for value in outputs),
@@ -197,15 +199,20 @@ def replay(args):
                         x1, y1, x2, y2 = entry['roi']
                         image = image[int(y1*h):int(y2*h), int(x1*w):int(x2*w)].copy()
                     started = time.perf_counter()
+                    call_index = cycle * args.repeats * len(entries) + index
+                    call_context.update(index=call_index, label=entry['label'],
+                                        input_sha256=hashlib.sha256(image.tobytes()).hexdigest())
                     result = model.ocr(image)
                     seconds = time.perf_counter() - started
                     checks = expected_results(entry, result, image.shape)
                     failed_expectations += sum(not check['passed'] for check in checks)
-                    trace.emit('recognition', cycle=cycle, index=index, label=entry['label'],
+                    trace.emit('recognition', cycle=cycle, index=call_index, label=entry['label'],
+                               input_sha256=call_context['input_sha256'],
                                cold=index == 0, source_shape=source_shape, image_shape=list(image.shape),
                                seconds=seconds, result=result, expectation_checks=checks)
                     result = image = None
                 trace.phase = 'release'
+                call_context.clear()
                 trace.emit('release_requested', reason='finite replay cycle')
                 started = time.perf_counter()
                 for name in ('text_detector', 'text_recognizer', 'text_classifier'):
@@ -221,9 +228,14 @@ def replay(args):
                 trace.phase = 'after_release'
                 trace.sample()
                 trace.stop.wait(args.settle)
-            trace.emit('completed', cycles=args.cycles, failed_expectations=failed_expectations)
             if args.check_expected and failed_expectations:
+                trace.emit('failed', status='failed', reason='expectation_checks_failed',
+                           cycles=args.cycles, calls=args.cycles * args.repeats * len(entries),
+                           check_expected=True, failed_expectations=failed_expectations)
                 raise AssertionError(f'{failed_expectations} key text/position expectations failed')
+            trace.emit('completed', status='success', cycles=args.cycles,
+                       calls=args.cycles * args.repeats * len(entries), check_expected=args.check_expected,
+                       failed_expectations=failed_expectations)
     finally:
         PredictBase._run_openvino_async = original
 
@@ -275,7 +287,10 @@ def summarize(paths):
     return reports
 
 
-def compare(reference, paths):
+def compare(reference, paths, strict=False):
+    if strict:
+        from scripts.ocr_replay_compare import strict_compare
+        return strict_compare(reference, paths)
     def observations(path):
         with path.open(encoding='utf-8') as source:
             for line in source:
@@ -306,7 +321,7 @@ def compare(reference, paths):
                     differences.append({'label': row['label'], 'index': row['index'],
                                         'expected': baseline, 'actual': actual})
         comparisons.append({'file': str(path), 'calls': calls, 'equal': not differences,
-                            'differences': differences})
+                            'scope': 'observed_labels', 'differences': differences})
     return comparisons
 
 
@@ -329,6 +344,7 @@ def main():
     summary.add_argument('paths', nargs='+', type=Path)
     comparison = sub.add_parser('compare')
     comparison.add_argument('--reference', type=Path, required=True)
+    comparison.add_argument('--strict', action='store_true', help='Require complete, ordered, identical-input replays')
     comparison.add_argument('paths', nargs='+', type=Path)
     sample = sub.add_parser('sample')
     sample.add_argument('--pid', type=int, required=True)
@@ -339,7 +355,7 @@ def main():
     if args.command == 'summarize':
         print(json.dumps(summarize(args.paths), indent=2))
     elif args.command == 'compare':
-        result = compare(args.reference, args.paths)
+        result = compare(args.reference, args.paths, strict=args.strict)
         print(json.dumps(result, ensure_ascii=False, indent=2))
         if not all(item['calls'] and item['equal'] for item in result):
             raise SystemExit(1)
