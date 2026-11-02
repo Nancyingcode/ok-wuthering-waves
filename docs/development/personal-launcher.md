@@ -13,7 +13,7 @@ The launcher manages one application with Official and Personal profiles baked i
 
 ## 构建 / Build
 
-需要 Windows、PowerShell 7、Git、Node.js、pnpm、Rust 和 Visual Studio C++ 构建工具。脚本使用 PyAppify 自带的 pnpm 锁文件，不修改本项目的 Python 依赖。
+需要 Windows x64、PowerShell 7、Git、Node.js、pnpm、Rust 和 Visual Studio C++ 构建工具。CI 使用 Node.js 24、pnpm 11、Rust **1.99.1**；成品指纹记录实际 patch 版本及 Runner 镜像版本。脚本使用 PyAppify 自带的 pnpm 锁文件，不修改本项目的 Python 依赖。
 
 ```powershell
 .\scripts\build_personal_launcher.ps1
@@ -28,7 +28,7 @@ The launcher manages one application with Official and Personal profiles baked i
 构建过程中的检查：
 
 1. `git apply --check`：补丁可以干净应用，或此前已经应用过。
-2. `pnpm tauri build --no-bundle`：通过 `beforeBuildCommand` 构建一次前端，再生成便携版可执行文件。先完成这一步，保证干净检出时 Rust 测试也能找到需要嵌入的前端资源。
+2. `pnpm build` 后执行 `pnpm tauri build --no-bundle --config <准备生成的覆盖文件>`：分别计时 TypeScript/Vite 和 Rust 构建。覆盖文件只关闭重复的 beforeBuildCommand，并进入输入指纹；前端只构建一次。Build 完成后再 Test，保证干净检出的 Rust 测试能找到嵌入资源。已通过固定上游 Tauri CLI 的 `build --help` 核对 --config 支持。
 3. `cargo test --release --lib launcher_profiles`：双源配置、`configs` 保护等补丁测试；测试失败时不会继续打包安装程序。
 4. `pnpm tauri bundle`：复用上一步的二进制生成 NSIS 安装包。
 
@@ -48,24 +48,94 @@ The launcher manages one application with Official and Personal profiles baked i
 .\scripts\build_personal_launcher.ps1 -PrepareOnly
 ```
 
+默认 `-Phase All` 保留一次执行完整构建的行为，也可以逐阶段执行：
+
+```powershell
+.\scripts\build_personal_launcher.ps1 -Phase Prepare
+.\scripts\build_personal_launcher.ps1 -Phase Build
+.\scripts\build_personal_launcher.ps1 -Phase Test
+.\scripts\build_personal_launcher.ps1 -Phase Bundle
+```
+
+`Build`、`Test`、`Bundle` 只验证准备状态，不隐式重复 Prepare。Prepare 对相同文本、YAML、图标和已应用补丁不重复写入，保持内容与 mtime。Cargo.toml 提前使用 Tauri CLI 的 LF 格式，避免本地 CRLF 检出在构建时被 CLI 改写。它也提前同步独立 PyAppify 检出的 Cargo.lock 中的应用名称，避免首次 Cargo 构建改写锁文件、使准备快照和依赖缓存 key 失效；本项目的依赖锁文件不受影响。
+
+准备记录覆盖固定上游提交、本地构建输入以及准备后的源码内容；输入改变后必须重新 Prepare。Test 要求 Build 成功，Bundle 要求 Build 和 Test 成功；失败重试先清除后续成功记录。外部命令非零退出会停止当前阶段。`-PrepareOnly` 等价于 `-Phase Prepare`，与显式的其他 Phase（包括 All）同时使用会报错。
+
 ## 持续集成 / CI
 
-`.github/workflows/build.yml` 在 `package` 任务中为本仓库（`Nancyingcode/ok-wuthering-waves`）接入个人启动器构建：
+`.github/workflows/build.yml` 保持原来的 `v*` tag push / workflow_dispatch 触发范围：
 
-- `actions/checkout` 仍按触发标签检出源码，`fetch-depth: 0` 保留版本信息；启动器源码由脚本自己按固定提交检出，不受分支漂移影响。
-- 构建前检查 `git`、`node`、`pnpm.cmd`、`cargo.exe` 是否存在，固定 Node.js 24 和 pnpm 11；Rust 使用 `windows-latest` 自带的 stable 工具链。
-- 脚本通过 HTTPS 克隆 PyAppify，避免 CI 中缺少 SSH agent。
-- 构建完成后校验 `dist/ok-ww-personal-win32-setup.exe`、`dist/ok-ww-personal-win32.zip` 与便携版可执行文件确实存在，再复制到 `pyappify_dist/` 参与制品上传和 Release。
-- 原作者的 SignPath 签名步骤只在 `ok-oldking/ok-wuthering-waves` 仓库生效（`SIGN_BUILD` 要求 `github.repository == 'ok-oldking/ok-wuthering-waves'`），个人仓库恒为 `false`，因此产物为未签名安装包，首次运行时可能出现 SmartScreen 提示。已发布的 `v1.0.1` 同样未签名：`ok-ww-win32-China-setup.exe`、`ok-ww-win32-online-setup.exe` 及 zip 内的 `ok-ww.exe` 经 `Get-AuthenticodeSignature` 校验均为 `NotSigned`。
-- 官方 `pyappify-action` 会先删除 `pyappify_dist/` 再按根目录 `pyappify.yml` 打包 China / Global，故构建、复用官方可执行文件和生成官方安装包均限定为仅上游仓库执行，避免个人仓库的启动器产物被覆盖。
+- `validate` 每次验证当前业务提交，`synchronize` 仍依赖 validate。fork 的 `package_personal` 与 validate 并行；原 `package` 仅在上游执行，并继续依赖 synchronize。
+- `publish` 等待以上四个 job，要求 validate、synchronize 和对应仓库的 package 路径成功；互斥路径 skipped 不阻断发布。失败、取消、手动构建或普通分支 push 均不能发布。
+- checkout 仍使用当前 tag / 提交及完整历史，PyAppify 则固定提交并通过 HTTPS 克隆。缓存中的旧 launcher 来源 SHA 只用于追溯，不替换本次业务 tag / SHA。
+- personal job 显式设置 `SIGN_BUILD=false`。上游的同步、SignPath 签名、官方 pyappify-action 和分发步骤保持原行为。
+- 只有实际 package 路径上传一个 `release-assets`。个人路径只 stage 安装包与 ZIP，保持现有补发入口的文件白名单兼容；完整成品命中无需独立便携 EXE，完整本地构建仍保留所有 dist 输出。
 
 ### 构建耗时与缓存 / Build Time and Caches
 
-- `validate` 继续安装 Python 依赖并运行原有测试；个人仓库的 `synchronize` 和 `package` 不再重复安装完整 Python 环境。在线启动器打包不需要预装游戏应用依赖；上游仓库保留原有准备流程。
-- 启动器源码先通过 `-PrepareOnly` 准备，随后按它的 `pnpm-lock.yaml` 缓存 pnpm 下载内容，按 Rust 工具链、Cargo 清单及锁文件缓存 Rust 依赖与编译结果。前端由 Tauri 构建一次，NSIS 打包复用已构建的可执行文件。
-- 已压缩的 EXE/ZIP 上传为 Actions 制品时使用 `compression-level: 0`，避免再次压缩。
-- 首次构建仍需下载和编译；后续耗时取决于缓存命中。GitHub 的缓存按分支或标签隔离，新标签不能读取其他标签创建的缓存，但能读取默认分支缓存，详见 [GitHub 缓存访问限制](https://docs.github.com/en/actions/reference/workflows-and-actions/dependency-caching#restrictions-for-accessing-a-cache)。
-- 合入默认分支 `personal` 后，在 Actions → Windows Release → Run workflow 中选择 `personal` 手动构建一次以预热缓存。更新启动器依赖、Rust 工具链或缓存失效后可重新运行。手动构建仍执行测试、打包并上传制品，跳过更新仓库同步与 `publish`，不会创建 Release。
+先 Prepare，再恢复任何 Rust 缓存，避免准备阶段清理不完整的源码目录时删除 target。完整成品使用 `actions/cache/restore` / `save`，只接受精确 key，没有 restore-keys。未命中时继续使用 pnpm 下载缓存及 Rust 编译依赖缓存；Rust `shared-key: personal-launcher` 代替隐含的 job key，仍保留工具链、Cargo 清单和锁文件 hash，因此迁移后的第一次可能 miss。该语义见 [rust-cache 的 action 输入](https://github.com/Swatinem/rust-cache/blob/v2/action.yml)。
+
+完整 key 格式为 `personal-launcher-win-x64-v1-<sha256>`，由 `scripts/personal_launcher_cache.cjs` 生成，输入包括：
+
+- 固定 PyAppify commit、准备后的源码及锁文件内容。
+- profiles 补丁、personal YAML、两个图标、构建脚本及实际参与的辅助脚本；第一版保守纳入 build.yml。
+- release profile、默认 features、Windows x64 MSVC target，以及影响编译/打包的环境覆盖值摘要。
+- 实际 Node、pnpm、rustc、Cargo、PowerShell、OS 架构及 Runner ImageOS / ImageVersion。
+
+输入按稳定的相对路径排序、对内容计算 SHA-256，必要文件缺失直接失败。不使用 mtime、当前业务提交/tag/分支、普通 Python 源码、requirements 或业务测试作为失效项。`force_launcher_rebuild` 也不改变指纹。不支持改变输出位置的 `CARGO_TARGET_DIR` / `CARGO_BUILD_TARGET` 或外部 `TAURI_CONFIG`；本地使用这些覆盖时需先清除后再进入缓存流程。
+
+缓存目录 `build/launcher-cache/` 仅包含安装包、ZIP、manifest.json。manifest 记录 schema、完整指纹与输入、上游 SHA、原 launcher 构建仓库/提交/run URL、launcher_profiles 通过记录，以及两个文件的字节数和 SHA-256。校验通过后才复用，跳过 pnpm 依赖恢复/install、Rust 缓存恢复/build、launcher_profiles 和 bundle；当前业务 validate 照常执行。缓存校验失败会给出原因、清理本任务独立暂存目录并重建。仅本次 Build、Test、Bundle 全成功才生成新 manifest、保存成品缓存；业务测试失败仍禁止发布。
+
+EXE/ZIP 上传继续使用 `compression-level: 0`。输入、manifest 和计时信息单独上传为 `launcher-build-metadata`，不会进入 release-assets。`report_personal` 在验证/构建结束（包括缓存保存 post-action）后采集各 job / action 的实际时间，单独上传 `launcher-run-timings`；GitHub run 页面提供完整工作流墙钟时间。脚本分别记录 Prepare、install、TypeScript/Vite、Rust 正式构建、测试编译/执行、NSIS、ZIP 等阶段耗时；Rust 阶段包含编译和链接，不能把日志空白视作链接耗时。
+
+### 手动构建与回退 / Manual Builds and Fallback
+
+1. Actions → **Windows Release** → **Run workflow**，选择相应分支，默认 `force_launcher_rebuild=false`，尝试复用精确成品。
+2. 需要热依赖重建时勾选 `force_launcher_rebuild=true`：跳过成品恢复，保留 Rust/pnpm 缓存，不删除远端缓存或覆盖同 key。
+3. 合入默认分支 `personal` 后，选择 **personal** 手动运行一次建立共享缓存，再运行一次观察成品命中。开发分支缓存不等于默认分支预热。手动构建不创建 tag 或 Release。
+4. 成功运行的 release-assets 可按下节 **Publish Existing Build** 补发，版本标签始终绑定所选业务构建 run 的 head_sha。
+5. 缓存损坏时先用强制重建绕过；远端 key 不可覆盖，维护时递增辅助脚本的 `SCHEMA`（同时使准备状态失效），在 personal 上重新预热。不自动删除远端缓存、不添加随机 key。
+
+GitHub 缓存按 ref 隔离；不同 tag 之间不能直接互读，但可以读取默认分支的精确缓存，见 [GitHub 缓存访问限制](https://docs.github.com/en/actions/reference/workflows-and-actions/dependency-caching#restrictions-for-accessing-a-cache)。跨 tag 行为需要后续正常发布运行观察，本轮不为性能验证创建版本。Runner 镜像或实际工具版本变化会正常失效。
+
+本地完整构建始终可直接运行 All，不依赖远端成品缓存。要检查成品缓存流程，可以在相同环境依次执行（先完成 Prepare / All）：
+
+```powershell
+node scripts/personal_launcher_cache.cjs fingerprint
+.\scripts\build_personal_launcher.ps1 -Phase All
+node scripts/personal_launcher_cache.cjs manifest
+$env:LAUNCHER_CACHE_HIT = 'true'
+node scripts/personal_launcher_cache.cjs verify
+node scripts/personal_launcher_cache.cjs stage
+Remove-Item Env:\LAUNCHER_CACHE_HIT
+```
+
+本地验证必须保持环境一致：CI 的 `CARGO_INCREMENTAL=0` 在指纹计算前固定，避免 Rust 缓存 action 随后设置该值造成输入漂移。
+
+### 验证与性能记录 / Validation and Measurements
+
+```powershell
+node --test tests/test_personal_launcher_cache.cjs tests/test_launcher_workflow.cjs tests/test_publish_existing_build.cjs
+# 准备真实固定版本源码后启用幂等性、跨业务 SHA 复用、损坏缓存与 stage 集成用例：
+$env:LAUNCHER_INTEGRATION_SOURCE = (Resolve-Path build/pyappify).Path
+node --test tests/test_personal_launcher_cache.cjs
+Remove-Item Env:\LAUNCHER_INTEGRATION_SOURCE
+actionlint -shellcheck= -pyflakes= .github/workflows/build.yml .github/workflows/publish-existing-build.yml
+```
+
+CI 保留 Python 全量验证及现有 6 项 launcher_profiles 测试；只有已经通过相同输入测试的成品才可跳过后者。本地测试覆盖输入变化/排序/缺失、manifest 与内容损坏、失败传播、实际准备幂等性、stage 白名单及发布条件矩阵。
+
+| 样本 | 来源与条件 | 可用数据 |
+| --- | --- | --- |
+| 历史冷构建 | [41366113840](https://github.com/Nancyingcode/ok-wuthering-waves/actions/runs/41366113840)，业务 SHA `01e1146`，Windows 镜像 `windows-2025-vs2026 / 20261021.278.1`，rustc 1.99.1、pnpm 11.28.10，pnpm/Rust miss | 墙钟 20m18s；validate 3m29s；package 16m38s；Rust release 10m15s；测试编译 3m56s、执行 0.12s；约 9.13 MB 成品 |
+| 本轮本地完整构建 | 基线 `d98e2e3` + 本地未提交 diff；Windows 10.0.26200 x64、Node 24.17.0、pnpm 11.8.0、rustc/Cargo 1.99.1、PowerShell 7.6.5、VS Build Tools 18.7.11911.148；已预热本地 Rust target，测试目标首次编译 | All 从 Prepare 到 Bundle 完成约 **301.8s**；install 0.68s、前端 4.80s、Rust 164.70s、测试编译与执行 116.39s（6 项通过）、NSIS 5.92s、ZIP 1.08s。安装包 4,016,627 B，ZIP 5,109,974 B |
+| 本轮本地成品校验与 stage | 同一指纹及真实构建文件，无远端恢复/上传 | verify 返回 reuse_launcher=true，校验并 stage 两项文件共 **3.23s**；ZIP 内三项文件与便携目录逐项 hash 一致；该时间不包含指纹生成、GitHub cache restore/upload 或业务验证，不能视为 CI 墙钟 |
+| 新流程依赖热构建 | 在 personal 手动运行，force=true；以报告中实际缓存命中值为准 | 待 CI 测量，不以历史冷构建估算为实测收益 |
+| 新流程完整成品命中 | personal 同输入再次运行，force=false；manifest 和两文件校验通过 | 待 CI 测量；应跳过 Rust 恢复/build/test/bundle，validate 仍执行 |
+
+每次比较同时查看 metadata 的业务 SHA、工具链、两级缓存状态、原 launcher 来源、文件大小/hash，与 run-timings 的 job/action 时间。热依赖路径中 Rust 的精确命中和部分恢复可能不同，应结合 action 日志判断。整体墙钟、job 时间与内部子阶段有包含关系，不相加。并行化按旧样本推算约移出 3m29s 串行等待；成品命中收益需真实运行验证，不承诺固定耗时。本轮不改 Rust profile，不开展 ThinLTO 实验。
+
+本轮本地 97 项工具回归测试、6 项真实 launcher_profiles、完整 Rust/NSIS/ZIP 构建、manifest 校验与白名单 stage 均通过；详细记录保存在当前工作区 `build/launcher-metadata/local-validation.json`。本地机器与历史 GitHub Runner 的硬件、缓存及 pnpm patch 版本不同，不能据此计算优化比例。尚未执行 Python 全量验证（当前 worktree 无 `.venv`，全局仅 Python 3.14 且缺少业务依赖）、安装/来源切换交互测试及新工作流的远端运行；CI 冷/热/成品命中、默认分支预热与跨 tag 访问仍需观察。默认 `vswhere` 查询会漏掉 Build Tools，工具链指纹使用 `-products * -prerelease -requires ...VC.Tools.x86.x64` 获取实际安装版本。
 
 ### 发布校验值 / Release Checksums
 
