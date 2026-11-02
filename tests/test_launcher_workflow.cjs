@@ -26,6 +26,7 @@ const upstream = 'ok-oldking/ok-wuthering-waves';
 const fork = 'Nancyingcode/ok-wuthering-waves';
 function context(repository = fork) {
   return { github: { repository, event_name: 'push', ref: 'refs/tags/v1.0.3' },
+    inputs: { validate_only: false },
     needs: { validate: { result: 'success' }, synchronize: { result: 'success' },
       package: { result: repository === upstream ? 'success' : 'skipped' },
       package_personal: { result: repository === upstream ? 'skipped' : 'success' } } };
@@ -59,6 +60,28 @@ test('fork/upstream packaging are mutually exclusive and personal build has no v
     assert.equal(evaluate(condition(job('package_personal')), c), repository !== upstream);
   }
 });
+
+for (const repository of [fork, upstream]) {
+  test(`${repository}: validation-only applies to manual runs and cannot bypass tag packaging`, () => {
+    for (const event of ['workflow_dispatch', 'push']) {
+      for (const validateOnly of [true, false]) {
+        const c = context(repository);
+        c.github.event_name = event;
+        c.inputs.validate_only = validateOnly;
+        const shouldPackage = event === 'push' || !validateOnly;
+        assert.equal(evaluate(condition(job('package')), c), shouldPackage && repository === upstream);
+        assert.equal(evaluate(condition(job('package_personal')), c), shouldPackage && repository !== upstream);
+        if (event === 'workflow_dispatch') assert.equal(evaluate(condition(job('publish')), c), false);
+      }
+    }
+  });
+  test(`${repository}: validation-only input cannot publish failed validation on a tag`, () => {
+    const c = context(repository);
+    c.inputs.validate_only = true;
+    c.needs.validate.result = 'failure';
+    assert.equal(evaluate(condition(job('publish')), c), false);
+  });
+}
 
 function stepCondition(name) {
   const body = job('package_personal');

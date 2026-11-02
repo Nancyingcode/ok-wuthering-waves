@@ -71,6 +71,26 @@ The launcher manages one application with Official and Personal profiles baked i
 - personal job 显式设置 `SIGN_BUILD=false`。上游的同步、SignPath 签名、官方 pyappify-action 和分发步骤保持原行为。
 - 只有实际 package 路径上传一个 `release-assets`。个人路径只 stage 安装包与 ZIP，保持现有补发入口的文件白名单兼容；完整成品命中无需独立便携 EXE，完整本地构建仍保留所有 dist 输出。
 
+### Python 全量验证 / Python Validation
+
+`validate` 在两个独立 Windows runner 上分片。每个 runner 仍通过原 `run_test.py` 为每个模块单独启动 Python，保留 Qt / OCR / SDK 进程隔离、AVX2 兼容设置、真实 OCR 推理和原有测试内容。分片不会让测试并发写同一工作目录的配置与日志。
+
+`scripts/run_python_tests.py` 按文件名稳定排序后，用零基 `strategy.job-index` / `strategy.job-total` 分配全部 `tests/*.py`，覆盖原来的 `Test*.py`、`test_*.py` 及其他根目录 Python 文件。当前矩阵只有分片维度，Python 版本统一为 3.12。无模块、空分片、非法参数、子进程失败或缺少有效 unittest 结果均使验证失败；失败模块之后的其他模块继续执行，两个分片也不会互相取消。
+
+每个分片上传独立的 `python-validation-<index>`，记录完整文件列表及 SHA-256、所选模块、每模块测试数、跳过数、退出码和耗时，可核对分片并集完整且不重复。`synchronize` / `publish` 仍等待整个 validate 矩阵成功，没有 continue-on-error 或缓存测试结果。验证只浅取当前提交及全部当前文件/LFS 内容；上游同步与打包 job 继续保留完整历史。依赖与本项目 dev extras 合并为一次 pip 安装，仍检查本项目能否正常构建安装。
+
+本地全量执行与分片示例：
+
+```powershell
+.\run_tests.ps1
+.\run_tests.ps1 -ShardIndex 0 -ShardCount 2
+.\run_tests.ps1 -ShardIndex 1 -ShardCount 2
+```
+
+手动测量 Python 验证时，在 **Windows Release → Run workflow** 勾选 `validate_only=true`。该模式运行全部 Python 分片及构建/发布工具回归，保留 synchronize 检查，跳过两条 package 路径；不生成 release-assets，也不适合作为 Publish Existing Build 的来源。默认 false 的普通手动构建保持完整流程。tag push 始终运行正常打包路径，忽略该手动开关；发布门禁仍要求所有验证及对应 package 成功，手动运行始终不发布。
+
+优化基线为 [运行 #6](https://github.com/Nancyingcode/ok-wuthering-waves/actions/runs/41377826101)：validate 229s，其中 checkout 52s、安装 56s、测试 95s，62 个模块 / 936 项测试。浅取、单次安装和分片的实际收益以新 CI 报告为准；两个 runner 会重复各自的环境准备，不把墙钟缩短视为 runner 总用量等比例下降。
+
 ### 构建耗时与缓存 / Build Time and Caches
 
 先 Prepare，再恢复任何 Rust 缓存，避免准备阶段清理不完整的源码目录时删除 target。完整成品使用 `actions/cache/restore` / `save`，只接受精确 key，没有 restore-keys。未命中时继续使用 pnpm 下载缓存及 Rust 编译依赖缓存；Rust `shared-key: personal-launcher` 代替隐含的 job key，仍保留工具链、Cargo 清单和锁文件 hash，因此迁移后的第一次可能 miss。该语义见 [rust-cache 的 action 输入](https://github.com/Swatinem/rust-cache/blob/v2/action.yml)。
