@@ -1,0 +1,80 @@
+name: Publish Existing Build
+run-name: Publish ${{ inputs.version }} from build ${{ inputs.run_id }}
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: '版本号 / Version, e.g. v1.0.2 or v1.0.3-beta.1'
+        required: true
+        type: string
+      run_id:
+        description: '成功的 Windows Release 运行 ID / Successful build run ID'
+        required: true
+        type: string
+
+permissions:
+  actions: read
+  contents: write
+
+# Share the tag-build lock so the two entry points cannot publish concurrently.
+concurrency:
+  group: windows-release-refs/tags/${{ inputs.version }}
+  cancel-in-progress: false
+
+jobs:
+  publish:
+    if: github.repository == 'Nancyingcode/ok-wuthering-waves'
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Check out publishing tools
+        uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+
+      - name: Test publishing tools
+        run: node --test tests/test_publish_existing_build.cjs
+
+      - name: Validate source build and version
+        id: source
+        uses: actions/github-script@v7
+        env:
+          RELEASE_VERSION: ${{ inputs.version }}
+          SOURCE_RUN_ID: ${{ inputs.run_id }}
+        with:
+          script: |
+            const { validateSource } = require('./.github/scripts/publish_existing_build.cjs');
+            return await validateSource({
+              github,
+              context,
+              version: process.env.RELEASE_VERSION,
+              runId: process.env.SOURCE_RUN_ID,
+            });
+
+      - name: Download existing release assets
+        uses: actions/download-artifact@v4
+        with:
+          artifact-ids: ${{ fromJSON(steps.source.outputs.result).artifactId }}
+          github-token: ${{ github.token }}
+          run-id: ${{ fromJSON(steps.source.outputs.result).runId }}
+          path: release-assets
+          merge-multiple: true
+
+      - name: Generate checksums and publish existing assets
+        uses: actions/github-script@v7
+        env:
+          SOURCE_METADATA: ${{ steps.source.outputs.result }}
+        with:
+          github-token: ${{ github.token }}
+          script: |
+            const { publishRelease } = require('./.github/scripts/publish_existing_build.cjs');
+            const source = JSON.parse(process.env.SOURCE_METADATA);
+            const release = await publishRelease({ github, context, source, directory: 'release-assets' });
+            await core.summary
+              .addHeading('Published existing build / 已发布已有构建')
+              .addLink(source.version, release.html_url)
+              .addBreak()
+              .addLink(`Source run ${source.runId}`, source.runUrl)
+              .addRaw(`\n\nCommit: \`${source.sha}\`\n\nNo rebuild was performed.\n`)
+              .write();

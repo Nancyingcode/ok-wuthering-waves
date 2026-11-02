@@ -45,6 +45,9 @@ jobs:
           fetch-depth: 0
           persist-credentials: false
 
+      - name: Test existing-build publishing tools
+        run: node --test tests/test_publish_existing_build.cjs
+
       - name: Set up Python ${{ env.PYTHON_VERSION }}
         uses: actions/setup-python@v5
         with:

@@ -81,6 +81,26 @@ Linux 在清单和文件所在目录运行 `sha256sum --check SHA256SUMS.txt`。
 
 The packaging job builds the dual-profile launcher with HTTPS, verifies the artifacts, and stages them for release upload.
 
+### 发布已有构建 / Publish an Existing Build
+
+已经成功的手动构建可以直接发布，无需再次编译。`.github/workflows/publish-existing-build.yml` 提供独立网页入口，合入默认分支后可在 GitHub 上操作：
+
+1. 打开 Actions → **Publish Existing Build** → **Run workflow**。
+2. `Use workflow from` 选择 `personal`。
+3. `version` 填写新版本号，例如 `v1.0.2`；测试版可填写 `v1.0.3-beta.1`，工作流会自动标记为 prerelease。
+4. `run_id` 填写已经成功的 **Windows Release** 运行 ID。例如构建页面 URL 为 `.../actions/runs/41366113840`，则填写 `41366113840`。
+5. 点击 **Run workflow**。入口会下载原始 `release-assets`，生成 `SHA256SUMS.txt`，上传安装包、便携 ZIP 与校验清单，再发布 Release。运行摘要和 Release 说明会记录来源运行及源码提交。
+
+新标签绑定到**来源构建的 `head_sha`**，不使用发布入口运行时的最新提交。当前构建 `41366113840` 对应 `01e1146a743a9bc31745befae3d6cb27f50f7fe0`；即使入口在之后的提交上运行，发布这批产物的标签仍指向 `01e1146`。
+
+入口要求来源为本仓库成功完成的 `build.yml` 运行，其提交已经合入 `personal`，且恰好存在一个未过期的 `release-assets`。失败、未完成、PR/Fork、未合入的构建或已过期产物都会被拒绝。产物必须包含非空的 `ok-ww-personal-win32-setup.exe` 和 `ok-ww-personal-win32.zip`，旧版 China / Global 包不能被当作双版本包发布。
+
+已存在的 Release 不会被覆盖；已有标签只有在指向同一个源码提交时才允许复用。入口先建立草稿并上传全部附件，上传成功后才正式发布。若上传失败留下草稿，可检查并删除该草稿后，使用相同版本号和运行 ID 重试；指向同一提交的标签可以保留。
+
+入口只使用工作流自带的 `GITHUB_TOKEN` 创建标签和 Release，不需要个人访问令牌。根据 [GitHub 的工作流触发规则](https://docs.github.com/en/actions/how-tos/write-workflows/choose-when-workflows-run/trigger-a-workflow#triggering-a-workflow-from-a-workflow)，该令牌创建的标签不会触发另一次标签构建。入口不安装游戏依赖、不编译、不重新压缩或签名原产物，上传内容保持原始构建字节不变。
+
+Use **Publish Existing Build** with a version and a successful Windows Release run ID to publish the original artifacts and checksums without rebuilding. The tag always points to the source run's commit.
+
 ### 签名方案 / Signing Options
 
 当前个人双版本产物未接入签名。可选方案（核对日期：2026-11-02）：
