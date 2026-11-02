@@ -1,0 +1,17 @@
+{
+  "name": "ok-ww-dev",
+  "private": true,
+  "scripts": {
+    "commitlint": "commitlint",
+    "prepare": "node scripts/prepare-husky.cjs",
+    "test:commitlint": "node --test tests/test_commitlint.cjs"
+  },
+  "devDependencies": {
+    "@commitlint/cli": "^21.2.1",
+    "@commitlint/config-conventional": "^21.2.0",
+    "husky": "^9.1.7"
+  },
+  "engines": {
+    "node": ">=22.12.0"
+  }
+}

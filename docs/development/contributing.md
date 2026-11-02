@@ -54,6 +54,45 @@ This project only supports Python 3.12. Prefer using the repository-local virtua
 
 If `.venv` does not exist, use `python` instead of the interpreter path above.
 
+## 提交信息校验 / Commit Message Lint
+
+提交信息校验参考 [token-usage](https://github.com/Nancyingcode/token-usage)，使用 Husky 的 `commit-msg` 钩子和 `@commitlint/config-conventional`。开发时需要 Node.js 22.12+ 和 npm；在仓库根目录安装开发工具后自动启用钩子：
+
+Commit message lint follows [token-usage](https://github.com/Nancyingcode/token-usage), using a Husky `commit-msg` hook and `@commitlint/config-conventional`. Development requires Node.js 22.12+ and npm; installing the development tools from the repository root enables the hook automatically:
+
+```powershell
+npm ci
+```
+
+安装脚本在仓库已启用 `extensions.worktreeConfig` 时仅设置当前 worktree，否则使用仓库本地配置。CI、生产安装和 `HUSKY=0` 时跳过钩子安装。
+
+The prepare script configures only the current worktree when `extensions.worktreeConfig` is enabled; otherwise it uses repository-local configuration. Hook installation is skipped in CI, production installs, and when `HUSKY=0`.
+
+标题格式为 `type(scope): description`，scope 可省略；遵循 conventional 预设，包括普通标题最长 100 个字符、英文描述不以大写开头、不以句号结尾。描述支持中文。
+
+Use `type(scope): description`, with an optional scope. The conventional preset applies, including a 100-character regular header limit and English descriptions without an initial capital or trailing period. Chinese descriptions are supported.
+
+允许的 type / Allowed types: `build`, `chore`, `ci`, `docs`, `feat`, `fix`, `merge`, `perf`, `refactor`, `revert`, `style`, `test`。
+
+```text
+feat(task): 添加自动任务
+fix(combat): correct cooldown detection
+merge: integrate launcher changes
+merge(personal): integrate upstream changes
+```
+
+在预设允许的类型中额外加入 `merge`，并保留 commitlint 默认豁免规则，兼容 Git 自动生成的 `Merge branch ...` 和 `Merge pull request ...`。已有提交历史无需修改。
+
+The allowed types extend the preset with `merge`. Default commitlint ignores are preserved, supporting Git-generated `Merge branch ...` and `Merge pull request ...` messages. Existing history does not need to be rewritten.
+
+手动校验提交信息文件 / Validate a message file manually:
+
+```powershell
+npm run commitlint -- --edit
+npm run commitlint -- --last --verbose
+npm run test:commitlint
+```
+
 ## 测试 / Testing
 
 如需在同一启动器中切换官方版和个人版，请参阅[个人启动器配置与构建](personal-launcher.md)。
