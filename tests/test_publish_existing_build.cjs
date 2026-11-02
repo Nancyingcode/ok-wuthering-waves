@@ -42,7 +42,10 @@ function apiFixture(overrides = {}) {
       repos: {
         compareCommits: async () => ({ data: { status: state.comparison } }),
         getReleaseByTag: async () => state.existingRelease ? { data: state.existingRelease } : notFound(),
-        getCommit: async () => state.taggedSha ? { data: { sha: state.taggedSha } } : notFound(),
+        getCommit: async () => {
+          if (state.taggedSha) return { data: { sha: state.taggedSha } };
+          throw Object.assign(new Error('No commit found for SHA: refs/tags/v1.0.2'), { status: 422 });
+        },
         createRelease: async params => {
           writes.push(['draft', params]);
           return { data: { id: 456 } };
@@ -58,6 +61,7 @@ function apiFixture(overrides = {}) {
         },
       },
       git: {
+        getRef: async () => state.taggedSha ? { data: { object: { type: 'tag', sha: OTHER_SHA } } } : notFound(),
         createTag: async params => {
           writes.push(['tag', params]);
           return { data: { sha: OTHER_SHA } };
@@ -92,6 +96,31 @@ test('a completed same-repository build selects its original commit and artifact
   assert.deepEqual(await validate(fixture), SOURCE);
   assert.deepEqual(fixture.writes, []);
 });
+
+test('a missing tag does not reach the commits API that returns 422', async () => {
+  const fixture = apiFixture();
+  let commitLookups = 0;
+  fixture.github.rest.git.getRef = async params => {
+    assert.deepEqual(params, { ...CONTEXT.repo, ref: 'tags/v1.0.2' });
+    throw Object.assign(new Error('Reference does not exist'), { status: 404 });
+  };
+  fixture.github.rest.repos.getCommit = async () => {
+    commitLookups++;
+    throw Object.assign(new Error('No commit found for SHA: refs/tags/v1.0.2'), { status: 422 });
+  };
+  assert.deepEqual(await validate(fixture), SOURCE);
+  assert.equal(commitLookups, 0);
+  assert.deepEqual(fixture.writes, []);
+});
+
+for (const status of [403, 422]) {
+  test(`tag reference API error ${status} is not mistaken for an absent tag`, async () => {
+    const fixture = apiFixture();
+    fixture.github.rest.git.getRef = async () => { throw Object.assign(new Error('Reference lookup failed'), { status }); };
+    await assert.rejects(validate(fixture), /Reference lookup failed/);
+    assert.deepEqual(fixture.writes, []);
+  });
+}
 
 test('prerelease versions are identified without shell evaluation', async () => {
   const result = await validate(apiFixture(), { version: 'v1.0.3-beta.1' });
