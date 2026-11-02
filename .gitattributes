@@ -1,3 +1,4 @@
 .github/workflows/*.lock.yml linguist-generated=true merge=ours
 # Unified diff keeps a space on empty context lines and needs stable line endings.
 launcher/*.patch text eol=lf whitespace=-blank-at-eol
+.husky/* text eol=lf

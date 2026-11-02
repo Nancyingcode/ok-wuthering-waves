@@ -1,4 +1,6 @@
 .venv
+node_modules/
+.husky/_/
 onnxocr/
 ok_tasks/
 ok_import/
