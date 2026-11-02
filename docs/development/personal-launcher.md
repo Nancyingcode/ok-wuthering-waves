@@ -130,12 +130,25 @@ CI 保留 Python 全量验证及现有 6 项 launcher_profiles 测试；只有�
 | 历史冷构建 | [41366113840](https://github.com/Nancyingcode/ok-wuthering-waves/actions/runs/41366113840)，业务 SHA `01e1146`，Windows 镜像 `windows-2025-vs2026 / 20261021.278.1`，rustc 1.99.1、pnpm 11.28.10，pnpm/Rust miss | 墙钟 20m18s；validate 3m29s；package 16m38s；Rust release 10m15s；测试编译 3m56s、执行 0.12s；约 9.13 MB 成品 |
 | 本轮本地完整构建 | 基线 `d98e2e3` + 本地未提交 diff；Windows 10.0.26200 x64、Node 24.17.0、pnpm 11.8.0、rustc/Cargo 1.99.1、PowerShell 7.6.5、VS Build Tools 18.7.11911.148；已预热本地 Rust target，测试目标首次编译 | All 从 Prepare 到 Bundle 完成约 **301.8s**；install 0.68s、前端 4.80s、Rust 164.70s、测试编译与执行 116.39s（6 项通过）、NSIS 5.92s、ZIP 1.08s。安装包 4,016,627 B，ZIP 5,109,974 B |
 | 本轮本地成品校验与 stage | 同一指纹及真实构建文件，无远端恢复/上传 | verify 返回 reuse_launcher=true，校验并 stage 两项文件共 **3.23s**；ZIP 内三项文件与便携目录逐项 hash 一致；该时间不包含指纹生成、GitHub cache restore/upload 或业务验证，不能视为 CI 墙钟 |
+| CI 完整构建 | [运行 #4 / 41375483752](https://github.com/Nancyingcode/ok-wuthering-waves/actions/runs/41375483752)，提交 `8bf2ebb`；成品 miss、Rust 依赖 miss、pnpm hit；镜像 `20261021.278.1`，Node 24.22.1、pnpm 11.28.10、Rust/Cargo 1.99.1、PowerShell 7.6.7、MSVC 18.11.12315.225 | 整体 **18m21s**；validate **3m36s**，personal package **18m06s**，两者并行；Rust 616.15s，测试编译与执行 234.36s（6 项通过）；成功保存精确成品缓存，Publish skipped |
+| CI 镜像变更诊断 | [运行 #5 / 41377246188](https://github.com/Nancyingcode/ok-wuthering-waves/actions/runs/41377246188)，同一提交；镜像变为 `20261030.294.1`，Node 24.22.2、PowerShell 7.6.9、MSVC 18.11.12328.437 | 准备后的源码输入及环境覆盖摘要完全相同，工具版本变化使指纹正确失效；停止重复编译后检查元数据，未把这次取消的运行计为命中或成功构建样本，也未完成新镜像预热 |
 | 新流程依赖热构建 | 在 personal 手动运行，force=true；以报告中实际缓存命中值为准 | 待 CI 测量，不以历史冷构建估算为实测收益 |
-| 新流程完整成品命中 | personal 同输入再次运行，force=false；manifest 和两文件校验通过 | 待 CI 测量；应跳过 Rust 恢复/build/test/bundle，validate 仍执行 |
+| CI 完整成品命中 | [运行 #6 / 41377826101](https://github.com/Nancyingcode/ok-wuthering-waves/actions/runs/41377826101)，同一提交、同一 `20261021.278.1` 镜像与工具链，force=false | 整体 **4m08s**；validate **3m49s**、personal package **1m27s**；精确命中并核验 manifest / 文件，跳过 pnpm 和 Rust 依赖恢复、build、launcher_profiles、bundle 及成品保存；Publish skipped |
 
 每次比较同时查看 metadata 的业务 SHA、工具链、两级缓存状态、原 launcher 来源、文件大小/hash，与 run-timings 的 job/action 时间。热依赖路径中 Rust 的精确命中和部分恢复可能不同，应结合 action 日志判断。整体墙钟、job 时间与内部子阶段有包含关系，不相加。并行化按旧样本推算约移出 3m29s 串行等待；成品命中收益需真实运行验证，不承诺固定耗时。本轮不改 Rust profile，不开展 ThinLTO 实验。
 
-本轮本地 97 项工具回归测试、6 项真实 launcher_profiles、完整 Rust/NSIS/ZIP 构建、manifest 校验与白名单 stage 均通过；详细记录保存在当前工作区 `build/launcher-metadata/local-validation.json`。本地机器与历史 GitHub Runner 的硬件、缓存及 pnpm patch 版本不同，不能据此计算优化比例。尚未执行 Python 全量验证（当前 worktree 无 `.venv`，全局仅 Python 3.14 且缺少业务依赖）、安装/来源切换交互测试及新工作流的远端运行；CI 冷/热/成品命中、默认分支预热与跨 tag 访问仍需观察。默认 `vswhere` 查询会漏掉 Build Tools，工具链指纹使用 `-products * -prerelease -requires ...VC.Tools.x86.x64` 获取实际安装版本。
+本轮本地 97 项工具回归测试、6 项真实 launcher_profiles、完整 Rust/NSIS/ZIP 构建、manifest 校验与白名单 stage 均通过；本地记录保存在当时工作区的 `build/launcher-metadata/local-validation.json`。本地机器与历史 GitHub Runner 的硬件、缓存及 pnpm patch 版本不同，不能据此计算优化比例。随后合入 personal 的提交 `8bf2ebb` 已通过以上 CI 验证：两次成功运行均执行 62 个模块、936 项 Python 测试（无跳过），成品命中不跳过当前业务验证。普通分支推送和这些手动构建均未创建版本。
+
+运行 #4 和 #6 的 key 均为 `personal-launcher-win-x64-v1-3f2133a8fd6b877a1d6d00a34e8a87a7fb445faa8ea8c10ecb09715428fda1fd`。#6 的 manifest 保留原 launcher 来源 #4，两次 release-assets 独立下载后均恰好包含两项文件，逐项大小和 SHA-256 完全相同：
+
+| 文件 | 字节数 | SHA-256 |
+| --- | ---: | --- |
+| `ok-ww-personal-win32-setup.exe` | 4,016,566 | `ca8839ae811b944c7e169618de6c4a8f05b99af11485d5d64d3b23b667fe835e` |
+| `ok-ww-personal-win32.zip` | 5,109,951 | `d6494715753f31521d84e3858af5c226412ab00963e459289c37b212bc8230c4` |
+
+两次连续手动运行可能遇到 Runner 滚动换版，不能只按提交相同就认定必须命中。#5 的真实失效原因是工具链变化；测试准备步骤中模拟的损坏缓存日志属于回归用例，应与实际 Verify complete launcher cache 步骤区分。将来分配到未预热的 `20261030.294.1` 镜像时，仍会正常重建并保存该镜像对应的独立 key。默认 `vswhere` 查询会漏掉 Build Tools，工具链指纹使用 `-products * -prerelease -requires ...VC.Tools.x86.x64` 获取实际安装版本。
+
+安装/来源切换交互、强制重建的完整依赖热构建及跨 tag 访问尚未实测；跨 tag 验证留待正常发布观察，不为性能测试创建 tag 或 Release。上述测量中 job 和子阶段存在包含关系，整体时间使用 run 起止时间，不能相加。
 
 ### 发布校验值 / Release Checksums
 
