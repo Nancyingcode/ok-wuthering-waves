@@ -111,3 +111,15 @@ Windows 已知边界仍为：裸 `/S` 同版本重装超时；深安装目录受
 可审查的 [CI Windows 验收记录](personal-runtime-v1.0.5-ci-acceptance.json) 绑定上述实际附件、业务 run、原始 Git 配方字节及已公开运行 `v1.0.4` 的迁移基线。Windows 工作树可能转换 CRLF，输入 hash 使用构建提交的原始 Git blob 核对，没有放宽发布器的字节校验。迁移批准应引用该记录的不可变提交 URL，随后由 CI 实测 token 的跨仓库写入权限并发布。
 
 仍未验证的 Windows 范围：裸 `/S` 同版本重装超时、深目录系统长路径限制、游戏/NPU、真实私人配置迁移；原生界面截图自动化不可用，视觉结果依赖用户确认。公开 `v1.0.4` → 新版的实际更新需在新版运行 tag 发布后执行，不能用本地 fixture 代替。
+
+## v1.0.5 公开发布与更新结果
+
+[Publish Existing Build 41831359904](https://github.com/Nancyingcode/ok-wuthering-waves/actions/runs/41831359904) 已成功，使用 `personal` 上的发布工具提交 `b4a1447c7b84f24f4bf505baa8335552d468a528`，复用业务提交 `5c131778dfbe3e12a8d5d4174998b5ac8309476e` 的原始 Build 产物，没有重新编译。源码构建从开始到完成 8 分 26 秒，发布任务 1 分 5 秒；后者不包含此前在本机进行的 Windows 验收。
+
+- [源码及启动器 Release v1.0.5](https://github.com/Nancyingcode/ok-wuthering-waves/releases/tag/v1.0.5) 已公开，包含安装包、ZIP 及 `SHA256SUMS.txt`。GitHub 附件大小和 SHA-256 与同 run CI 回执完全一致。
+- Actions 实际使用已配置的 `PERSONAL_RUNTIME_TOKEN` 完成运行仓库原子 push；迁移批准绑定上述公开验收提交及实际附件。`PERSONAL_RUNTIME_REPOSITORY`、`PERSONAL_RUNTIME_BRANCH`、token 和批准均已完成真实发布验证，不再是“仅确认配置存在”。
+- 运行仓库 `main` 和 `v1.0.5` 指向 `bc5467ba5a6ee959ce6aa7b444812f584f761c4d`，其父提交为原 `v1.0.4`。新提交的 author、committer 及 GitHub 关联账号均确认为 Nancyingcode，历史 `v1.0.4` 未重写。
+- 新 manifest 为 `25cd22213bf5f351de32db72e67f888b505fc0fc2fd67c65c3e69a0d71cea5a3`，业务来源确认为 `5c131778…`；payload 仍为 `5495007524cdcce3f53058bc08a8d4fbabc8c2163135a43df87146f8a27c9d16`。本版主要修改启动器及发布工具，运行业务内容相同。
+- 公开后使用实际 CI EXE 在 `C:\wwci5` 执行 `v1.0.4` → `v1.0.5` 更新，6.157 秒内完成并核对。版本为 Personal `v1.0.5`、installed=true、自动启动关闭，实际 HEAD 与公开运行 commit 一致。Python、pip 缓存、资源、配置及用户脚本的文件清单/大小/mtime 均保持不变。此耗时包含本地快照和断言，不作为纯网络耗时。
+
+完整公开摘要见 [发布与公开更新回执](personal-runtime-v1.0.5-publication.json)。此前本地 fixture 之外的真实公开更新缺项已关闭；上述 Windows 已知限制仍保留，没有启动游戏、测试 NPU 或迁移真实私人数据。

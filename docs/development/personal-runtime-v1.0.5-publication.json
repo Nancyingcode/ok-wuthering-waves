@@ -1,0 +1,128 @@
+{
+  "schema": 1,
+  "date": "2026-11-04",
+  "verification": {
+    "passed": true,
+    "sourceSha": "5c131778dfbe3e12a8d5d4174998b5ac8309476e",
+    "sourceBuildRunId": 41826030867,
+    "publicationRunId": 41831359904,
+    "releaseUrl": "https://github.com/Nancyingcode/ok-wuthering-waves/releases/tag/v1.0.5",
+    "runtimeRepository": "Nancyingcode/ok-ww-personal-update",
+    "runtimeCommit": "bc5467ba5a6ee959ce6aa7b444812f584f761c4d",
+    "runtimeAuthor": "Nancyingcode",
+    "runtimeAuthorLogin": "Nancyingcode",
+    "runtimeCommitter": "Nancyingcode",
+    "manifestHash": "25cd22213bf5f351de32db72e67f888b505fc0fc2fd67c65c3e69a0d71cea5a3",
+    "payloadHash": "5495007524cdcce3f53058bc08a8d4fbabc8c2163135a43df87146f8a27c9d16",
+    "assets": [
+      {
+        "name": "ok-ww-personal-win32-setup.exe",
+        "size": 4013419,
+        "digest": "sha256:a13f1421cc53538696d666c92d7362b7be4fb6641697d624850ee2f4005ab941",
+        "browser_download_url": "https://github.com/Nancyingcode/ok-wuthering-waves/releases/download/v1.0.5/ok-ww-personal-win32-setup.exe"
+      },
+      {
+        "name": "ok-ww-personal-win32.zip",
+        "size": 5104242,
+        "digest": "sha256:2bf96b6a23915b2d86c168fd0c26144cf7c6de68916d06473270533739d332b8",
+        "browser_download_url": "https://github.com/Nancyingcode/ok-wuthering-waves/releases/download/v1.0.5/ok-ww-personal-win32.zip"
+      },
+      {
+        "name": "SHA256SUMS.txt",
+        "size": 188,
+        "digest": "sha256:e745fe81858a8e2af59b902452691c3c555455041088cdc7ad7701783e1d1ecf",
+        "browser_download_url": "https://github.com/Nancyingcode/ok-wuthering-waves/releases/download/v1.0.5/SHA256SUMS.txt"
+      }
+    ],
+    "verifiedAt": "2026-11-04T12:42:37.5135825Z"
+  },
+  "publicationRun": {
+    "id": 41831359904,
+    "url": "https://github.com/Nancyingcode/ok-wuthering-waves/actions/runs/41831359904",
+    "headSha": "b4a1447c7b84f24f4bf505baa8335552d468a528",
+    "conclusion": "success",
+    "startedAt": "2026-11-04T12:40:51Z",
+    "finishedAt": "2026-11-04T12:41:56Z"
+  },
+  "receipt": {
+    "version": "v1.0.5",
+    "businessSourceSha": "5c131778dfbe3e12a8d5d4174998b5ac8309476e",
+    "sourceBuildRunId": 41826030867,
+    "runtimeRepository": "Nancyingcode/ok-ww-personal-update",
+    "runtimeBranch": "main",
+    "runtimeManifestHash": "25cd22213bf5f351de32db72e67f888b505fc0fc2fd67c65c3e69a0d71cea5a3",
+    "releaseAssetHashes": [
+      {
+        "name": "ok-ww-personal-win32-setup.exe",
+        "bytes": 4013419,
+        "sha256": "a13f1421cc53538696d666c92d7362b7be4fb6641697d624850ee2f4005ab941"
+      },
+      {
+        "name": "ok-ww-personal-win32.zip",
+        "bytes": 5104242,
+        "sha256": "2bf96b6a23915b2d86c168fd0c26144cf7c6de68916d06473270533739d332b8"
+      },
+      {
+        "name": "SHA256SUMS.txt",
+        "bytes": 188,
+        "sha256": "e745fe81858a8e2af59b902452691c3c555455041088cdc7ad7701783e1d1ecf"
+      }
+    ],
+    "launcherSource": {
+      "repository": "Nancyingcode/ok-wuthering-waves",
+      "runId": "41826030867",
+      "runUrl": "https://github.com/Nancyingcode/ok-wuthering-waves/actions/runs/41826030867",
+      "sha": "5c131778dfbe3e12a8d5d4174998b5ac8309476e"
+    },
+    "publisher": {
+      "repository": "Nancyingcode/ok-wuthering-waves",
+      "commit": "b4a1447c7b84f24f4bf505baa8335552d468a528",
+      "inputs": {
+        ".github/scripts/personal_release_contract.cjs": "2681f9f5224a56bb92a9472356158651304187614cf6a50a9b62161ecfaa6987",
+        ".github/scripts/publish_existing_build.cjs": "1196a545cd41aa4673d62c6baa19d1222c419f507587cdeab7ec21e22a448eaa",
+        ".github/scripts/publish_personal_runtime.cjs": "d5077eba5ad116d2369db6d0c90ccafe08c11be90afd39e1a6accb010335f1e4",
+        "scripts/export_personal_runtime.cjs": "258db4ec08dfae9b97e90f0c31587dd9c3cedec13971cdb6230d23dbd73d9247",
+        "scripts/personal_launcher_cache.cjs": "690059e655ba5a03a7cff91883b9e36289c7b71cf4af6666775c46b7c17f9eb6"
+      }
+    },
+    "phase": "complete",
+    "retryable": false,
+    "sourceReleaseUrl": "https://github.com/Nancyingcode/ok-wuthering-waves/releases/tag/untagged-b66055e96c1d33227602",
+    "exportPolicy": {
+      "version": 1,
+      "sha256": "4025ef2f114989b035962930ae7d77d20497e34ac43a6fa39dfae6000f1b90b5"
+    },
+    "payloadHash": "5495007524cdcce3f53058bc08a8d4fbabc8c2163135a43df87146f8a27c9d16",
+    "manifestHash": "25cd22213bf5f351de32db72e67f888b505fc0fc2fd67c65c3e69a0d71cea5a3",
+    "runtimeCommit": "bc5467ba5a6ee959ce6aa7b444812f584f761c4d",
+    "runtimeTree": "e65ae1addb0f3a708809c2e1ec34154f885b984c",
+    "migration": {
+      "version": "v1.0.4",
+      "evidenceUrl": "https://github.com/Nancyingcode/ok-wuthering-waves/blob/b4a1447c7b84f24f4bf505baa8335552d468a528/docs/development/personal-runtime-v1.0.5-ci-acceptance.json",
+      "currentRuntimeCommit": "bc5467ba5a6ee959ce6aa7b444812f584f761c4d"
+    }
+  },
+  "publicUpdate": {
+    "scope": "actual published v1.0.4 to v1.0.5 update through exact CI EXE",
+    "passed": true,
+    "startedAt": "2026-11-04T12:43:03.5154883Z",
+    "pythonUnchanged": true,
+    "pipCacheUnchanged": true,
+    "resourcesUnchanged": true,
+    "userDataUnchanged": true,
+    "app": {
+      "current_profile": "Personal",
+      "current_version": "v1.0.5",
+      "installed": true,
+      "auto_start": false
+    },
+    "head": "bc5467ba5a6ee959ce6aa7b444812f584f761c4d",
+    "finishedAt": "2026-11-04T12:43:09.6724343Z"
+  },
+  "limitations": [
+    "No game, NPU or real private user-data migration test",
+    "Deep paths remain subject to Windows long-path policy",
+    "Bare /S same-version NSIS reinstall previously timed out; supported /UPDATE passed",
+    "Native GUI capture unavailable; visual acceptance relied on user screenshot and reply"
+  ]
+}
