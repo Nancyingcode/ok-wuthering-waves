@@ -1,0 +1,96 @@
+{
+  "schema": 1,
+  "date": "2026-11-04",
+  "baseSourceCommit": "56528626905800696f686964ede3e231ac3e6ff2",
+  "testedBeforeCommit": true,
+  "publicReleaseUpdated": false,
+  "patchSha256": "2632ca93999593bd0f6ae29b3823cf86d4f90f2d820078b0d7cad771516ffa42",
+  "existingDownloadFixSectionsPreserved": true,
+  "nodeTests": {
+    "passed": 70,
+    "failed": 0,
+    "skipped": 0
+  },
+  "rustTests": {
+    "passed": 13,
+    "failed": 0,
+    "ignored": 0
+  },
+  "typeScriptAndVitePassed": true,
+  "buildTestBundlePassed": true,
+  "cacheSchema": 2,
+  "launcherFingerprint": "f47d5080acaf98e43c531688797bc2cd37ed39bb67ecab97d23b4f002a31ba8f",
+  "artifacts": [
+    {
+      "bytes": 4021311,
+      "name": "ok-ww-personal-win32-setup.exe",
+      "sha256": "ef703a6e082710ce76b92468319305656fe2c7866395551e6c105c39fa4ed803"
+    },
+    {
+      "bytes": 5110289,
+      "name": "ok-ww-personal-win32.zip",
+      "sha256": "5580e25085b0a41744547a522ba080464e711e7ef76aeda441be39a355dab966"
+    }
+  ],
+  "hiddenExecution": {
+    "passed": true,
+    "source": "actual NSIS cleanup invocation and error condition",
+    "templateSha256": "0fbc44623145e77402aebf83f11a56fda4e2d298d2d39974d2bc8ae293af2172",
+    "cases": [
+      {
+        "name": "success",
+        "exitCode": "0",
+        "errorGuard": "success",
+        "parentConsole": {
+          "console": 1448386,
+          "visible": false,
+          "argumentsPreserved": true
+        },
+        "childConsole": {
+          "handle": "1448386",
+          "visible": false
+        }
+      },
+      {
+        "name": "script-failure",
+        "exitCode": "2",
+        "errorGuard": "failure",
+        "parentConsole": {
+          "console": 1513922,
+          "visible": false,
+          "argumentsPreserved": true
+        },
+        "childConsole": {
+          "handle": "1513922",
+          "visible": false
+        }
+      },
+      {
+        "name": "launch-failure",
+        "exitCode": "error",
+        "errorGuard": "failure"
+      }
+    ]
+  },
+  "realInstaller": {
+    "executed": true,
+    "ordinaryUser": true,
+    "userExitedLauncherFirst": true,
+    "passed": true,
+    "startedAt": "2026-11-04T13:50:51.2237228Z",
+    "scope": "actual new installer /UPDATE on existing owned install; cached files and user data retained",
+    "installerSha256": "ef703a6e082710ce76b92468319305656fe2c7866395551e6c105c39fa4ed803",
+    "originalLauncherPids": [],
+    "installerExitCode": 0,
+    "installerProcessCleanupPassed": true,
+    "portableExeSha256": "68a984cae799a91d99adbcf29a298e4926987051c989132ce0e525db7377e913",
+    "installedExeSha256": "2b1d8739263fc840bc4145a5215ec289897da3ae86ee4b2065e3e7a624bc8f2c",
+    "cachedFilesAndUserDataPreserved": true,
+    "guiRestartSkipped": true,
+    "finishedAt": "2026-11-04T13:51:13.6548727Z"
+  },
+  "initialAdminHelper": {
+    "executed": false,
+    "reason": "Windows UAC cancelled"
+  }
+}
