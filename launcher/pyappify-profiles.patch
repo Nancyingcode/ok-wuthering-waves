@@ -301,10 +301,18 @@ index f8c43b2..138b17d 100644
          Profile {
              name: "default".to_string(),
 diff --git a/src-tauri/src/git.rs b/src-tauri/src/git.rs
-index 8f4e3e3..0643dae 100644
+index 8f4e3e3..45fa66b 100644
 --- a/src-tauri/src/git.rs
 +++ b/src-tauri/src/git.rs
-@@ -111,6 +111,11 @@ fn parse_version_tag(tag_name: &str) -> Option<VersionKey> {
+@@ -14,6 +14,7 @@ use std::fs;
+ use std::io::{self, Write};
+ use std::path::{Path, PathBuf};
+ use std::sync::{Arc, OnceLock};
++use std::time::{Duration, Instant};
+ use tokio::{sync::Mutex, task};
+ use tracing::{debug, info, warn};
+ 
+@@ -111,6 +112,11 @@ fn parse_version_tag(tag_name: &str) -> Option<VersionKey> {
      })
  }
  
@@ -316,7 +324,199 @@ index 8f4e3e3..0643dae 100644
  pub fn compare_version_tags(left: &str, right: &str) -> Option<Ordering> {
      Some(parse_version_tag(left)?.cmp(&parse_version_tag(right)?))
  }
-@@ -433,15 +438,47 @@ fn prune_deleted_local_tags_from_remote(
+@@ -168,19 +174,105 @@ fn configure_credentials(callbacks: &mut RemoteCallbacks<'static>, url: Option<&
+     }
+ }
+ 
+-fn create_proxy_options() -> ProxyOptions<'static> {
++fn proxy_bypasses_host(host: &str, port: u16, bypass: &str) -> bool {
++    bypass.split([';', ',']).any(|entry| {
++        let entry = entry.trim();
++        if entry.eq_ignore_ascii_case("<local>") {
++            return !host.contains('.');
++        }
++        if entry.is_empty() {
++            return false;
++        }
++        let target = if entry.contains(':') { format!("{host}:{port}") } else { host.to_string() };
++        let pattern = regex::escape(entry).replace("\\*", ".*").replace("\\?", ".");
++        Regex::new(&format!("(?i)^{pattern}$")).is_ok_and(|pattern| pattern.is_match(&target))
++    })
++}
++
++fn select_windows_proxy(remote_url: &str, server: &str, bypass: &str) -> Option<String> {
++    let remote = reqwest::Url::parse(remote_url).ok()?;
++    if !matches!(remote.scheme(), "http" | "https") {
++        return None;
++    }
++    let host = remote.host_str()?;
++    if proxy_bypasses_host(host, remote.port_or_known_default()?, bypass) {
++        return None;
++    }
++    let server = server.trim();
++    let selected = if server.contains('=') {
++        server.split(';').find_map(|entry| {
++            let (scheme, value) = entry.trim().split_once('=')?;
++            scheme.trim().eq_ignore_ascii_case(remote.scheme()).then_some(value.trim())
++        })?
++    } else {
++        server
++    };
++    if selected.is_empty() { return None; }
++    let proxy = if selected.contains("://") { selected.to_string() } else { format!("http://{selected}") };
++    let parsed = reqwest::Url::parse(&proxy).ok()?;
++    (matches!(parsed.scheme(), "http" | "https") && parsed.host_str().is_some()).then_some(proxy)
++}
++
++#[cfg(windows)]
++fn windows_system_proxy(remote_url: &str) -> Option<String> {
++    use windows_sys::Win32::System::Registry::{RegGetValueW, HKEY_CURRENT_USER, RRF_RT_REG_DWORD, RRF_RT_REG_SZ};
++    let key: Vec<u16> = "Software\\Microsoft\\Windows\\CurrentVersion\\Internet Settings\0".encode_utf16().collect();
++    let enabled_name: Vec<u16> = "ProxyEnable\0".encode_utf16().collect();
++    let mut enabled = 0u32;
++    let mut size = std::mem::size_of_val(&enabled) as u32;
++    // libgit2 AUTO checks Git/environment settings, but not the Windows user's
++    // Internet Settings. Read them without changing global or process settings.
++    let status = unsafe { RegGetValueW(HKEY_CURRENT_USER, key.as_ptr(), enabled_name.as_ptr(), RRF_RT_REG_DWORD,
++        std::ptr::null_mut(), (&mut enabled as *mut u32).cast(), &mut size) };
++    if status != 0 || enabled == 0 { return None; }
++    let read_string = |name: &str| -> Option<String> {
++        let name: Vec<u16> = name.encode_utf16().chain(Some(0)).collect();
++        let mut bytes = 0u32;
++        let status = unsafe { RegGetValueW(HKEY_CURRENT_USER, key.as_ptr(), name.as_ptr(), RRF_RT_REG_SZ,
++            std::ptr::null_mut(), std::ptr::null_mut(), &mut bytes) };
++        if status != 0 || bytes == 0 || bytes > 65536 { return None; }
++        let mut value = vec![0u16; (bytes as usize + 1) / 2];
++        let status = unsafe { RegGetValueW(HKEY_CURRENT_USER, key.as_ptr(), name.as_ptr(), RRF_RT_REG_SZ,
++            std::ptr::null_mut(), value.as_mut_ptr().cast(), &mut bytes) };
++        if status != 0 { return None; }
++        let end = value.iter().position(|&c| c == 0).unwrap_or(value.len());
++        String::from_utf16(&value[..end]).ok()
++    };
++    select_windows_proxy(remote_url, &read_string("ProxyServer")?, &read_string("ProxyOverride").unwrap_or_default())
++}
++
++#[cfg(not(windows))]
++fn windows_system_proxy(_remote_url: &str) -> Option<String> { None }
++
++fn create_proxy_options(repo: Option<&Repository>, remote_url: Option<&str>) -> ProxyOptions<'static> {
+     let mut proxy_opts = ProxyOptions::new();
+     proxy_opts.auto();
++    let explicit_environment = ["http_proxy", "HTTP_PROXY", "https_proxy", "HTTPS_PROXY", "all_proxy", "ALL_PROXY", "no_proxy", "NO_PROXY"]
++        .iter().any(|name| std::env::var_os(name).is_some());
++    let config = repo.map(Repository::config).unwrap_or_else(git2::Config::open_default).ok();
++    let explicit_git_proxy = config.as_ref().is_some_and(|config| {
++        config.entries(Some(".*\\.proxy$")).ok().is_some_and(|mut entries| entries.next().is_some())
++    });
++    let use_system_fallback = !explicit_environment && !explicit_git_proxy;
++    if use_system_fallback {
++        if let Some(url) = remote_url {
++            if let Some(proxy) = windows_system_proxy(url) {
++                proxy_opts.url(&proxy);
++            }
++        }
++    }
+     proxy_opts
+ }
+ 
+ fn create_fetch_options(
+     callbacks: RemoteCallbacks<'static>,
+     depth: Option<u32>,
++    repo: Option<&Repository>,
++    remote_url: Option<&str>,
+ ) -> FetchOptions<'static> {
+     let mut fo = FetchOptions::new();
+     fo.remote_callbacks(callbacks);
+-    fo.proxy_options(create_proxy_options());
++    fo.proxy_options(create_proxy_options(repo, remote_url));
+     if let Some(d) = depth {
+         fo.depth(d as i32);
+     }
+@@ -193,22 +285,31 @@ fn create_transfer_progress_callback(
+     prefix: String,
+ ) -> impl FnMut(Progress<'_>) -> bool + 'static {
+     let mut last_percent = -1.0;
++    let mut last_bytes = 0;
++    let mut last_report = Instant::now();
+     move |progress: Progress| {
+         let received_objects = progress.received_objects();
+         let total_objects = progress.total_objects();
++        let received_bytes = progress.received_bytes();
+         if total_objects > 0 {
+             let current_percent = (received_objects as f64 * 100.0) / total_objects as f64;
+             let rounded_percent = (current_percent * 10.0).round() / 10.0;
+-            if (rounded_percent - last_percent).abs() >= 0.1 || received_objects == total_objects {
++            // A single model blob can be tens of MB. Object-count percentages
++            // stay unchanged while it downloads, so also report moving bytes.
++            let bytes_advanced = received_bytes != last_bytes && last_report.elapsed() >= Duration::from_secs(1);
++            if (rounded_percent - last_percent).abs() >= 0.1 || bytes_advanced || received_objects == total_objects {
+                 emit_update_info!(
+                     app_name,
+-                    "\r{}: {:.1}% ({} / {}) ",
++                    "\r{}: {:.1}% ({} / {}), downloaded {} ",
+                     prefix,
+                     rounded_percent,
+                     received_objects,
+-                    total_objects
++                    total_objects,
++                    format_bytes(received_bytes)
+                 );
+                 last_percent = rounded_percent;
++                last_bytes = received_bytes;
++                last_report = Instant::now();
+             }
+         } else {
+             emit_update_info!(app_name, "\r{}: {} received... ", prefix, received_objects);
+@@ -239,6 +340,22 @@ fn get_sorted_tags_by_time(repo: &Repository) -> Result<Vec<String>> {
+     Ok(sorted_tags)
+ }
+ 
++fn recover_unborn_repository_head(repo: &Repository) -> Result<()> {
++    match repo.head() {
++        Ok(_) => return Ok(()),
++        Err(error) if error.code() == ErrorCode::UnbornBranch => {},
++        Err(error) => return Err(error).context("Failed to inspect repository HEAD"),
++    }
++    let versions = get_sorted_tags_by_time(repo)?;
++    let version = versions.iter().find(|tag| is_release_version(tag)).or_else(|| versions.first());
++    let Some(version) = version else { return Ok(()); };
++    let commit = repo.revparse_single(&format!("refs/tags/{version}"))?.peel_to_commit()?;
++    // An interrupted first clone has objects after retrying fetch, but no local
++    // branch. Setup needs a valid HEAD before it can select and install a tag.
++    repo.set_head_detached(commit.id()).context("Failed to initialize interrupted clone HEAD")?;
++    Ok(())
++}
++
+ fn collect_commit_messages_between_tags(
+     repo: &Repository,
+     previous_tag: Option<&str>,
+@@ -344,6 +461,7 @@ pub async fn get_version_history(
+ }
+ 
+ fn collect_remote_tag_names(
++    repo: &Repository,
+     remote: &mut git2::Remote<'_>,
+     remote_url: Option<&str>,
+ ) -> Result<HashSet<String>> {
+@@ -354,7 +472,7 @@ fn collect_remote_tag_names(
+         .connect_auth(
+             Direction::Fetch,
+             Some(callbacks),
+-            Some(create_proxy_options()),
++            Some(create_proxy_options(Some(repo), remote_url)),
+         )
+         .context("Failed to connect to remote for tag pruning")?;
+ 
+@@ -382,7 +500,7 @@ fn prune_deleted_local_tags_from_remote(
+         .find_remote(remote_name)
+         .with_context(|| format!("Failed to find remote '{}' for tag pruning", remote_name))?;
+     let remote_url = remote.url().ok().map(String::from);
+-    let remote_tags = collect_remote_tag_names(&mut remote, remote_url.as_deref())?;
++    let remote_tags = collect_remote_tag_names(repo, &mut remote, remote_url.as_deref())?;
+ 
+     let local_tag_array = repo
+         .tag_names(None)
+@@ -433,15 +551,47 @@ fn prune_deleted_local_tags_from_remote(
      Ok(())
  }
  
@@ -367,9 +567,29 @@ index 8f4e3e3..0643dae 100644
  }
  
  pub fn get_repository_origin_url(repo: &Repository) -> Result<Option<String>> {
-@@ -610,12 +647,8 @@ pub async fn ensure_repository(app: &App) -> Result<()> {
+@@ -492,7 +642,7 @@ pub async fn get_tags_and_current_version(
+         let mut remote_callbacks = RemoteCallbacks::new();
+         configure_credentials(&mut remote_callbacks, remote_url.as_deref());
  
-                     let mut fetch_options = create_fetch_options(callbacks, None);
+-        let mut fetch_options = create_fetch_options(remote_callbacks, None);
++        let mut fetch_options = create_fetch_options(remote_callbacks, None, Some(&repo), remote_url.as_deref());
+         fetch_options.prune(git2::FetchPrune::On);
+ 
+         remote
+@@ -595,6 +745,7 @@ pub async fn ensure_repository(app: &App) -> Result<()> {
+                 let repo_path_for_task = repo_path.clone();
+                 let url_for_task = url.clone();
+                 let app_name_for_task = app_name.clone();
++                let initialize_interrupted_clone = !app.installed;
+ 
+                 task::spawn_blocking(move || -> Result<()> {
+                     let repo = open_repository(&repo_path_for_task)?;
+@@ -608,14 +759,10 @@ pub async fn ensure_repository(app: &App) -> Result<()> {
+                         "Fetching objects".to_string(),
+                     ));
+ 
+-                    let mut fetch_options = create_fetch_options(callbacks, None);
++                    let mut fetch_options = create_fetch_options(callbacks, None, Some(&repo), Some(&url_for_task));
                      fetch_options.prune(git2::FetchPrune::On);
 -                    let refspecs = [
 -                        "+refs/heads/*:refs/remotes/origin/*",
@@ -381,8 +601,59 @@ index 8f4e3e3..0643dae 100644
                          .with_context(|| {
                              format!(
                                  "Failed to fetch updates for {}",
-@@ -696,19 +729,17 @@ pub async fn ensure_repository(app: &App) -> Result<()> {
-         let mut fetch_options = create_fetch_options(callbacks, None);
+@@ -626,6 +773,9 @@ pub async fn ensure_repository(app: &App) -> Result<()> {
+                     emit_update_info!(app_name_for_task, "");
+                     fetch_result?;
+                     prune_deleted_local_tags_from_remote(&repo, "origin", &app_name_for_task)?;
++                    if initialize_interrupted_clone {
++                        recover_unborn_repository_head(&repo)?;
++                    }
+                     emit_info!(app_name_for_task, "Fetch complete.");
+                     Ok(())
+                 })
+@@ -657,58 +807,22 @@ pub async fn ensure_repository(app: &App) -> Result<()> {
+         let mut callbacks = RemoteCallbacks::new();
+         configure_credentials(&mut callbacks, Some(&url_for_clone_task));
+         let app_name_for_progress_clone = app_name_for_messages.clone();
+-        callbacks.transfer_progress({
+-            let mut last_percent = -1.0;
+-            move |progress: Progress| {
+-                let received_objects = progress.received_objects();
+-                let total_objects = progress.total_objects();
+-                let indexed_objects = progress.indexed_objects();
+-                let received_bytes = progress.received_bytes();
+-                if total_objects > 0 {
+-                    let current_percent = (received_objects as f64 * 100.0) / total_objects as f64;
+-                    let rounded_percent = (current_percent * 10.0).round() / 10.0;
+-                    if (rounded_percent - last_percent).abs() >= 0.1 {
+-                        emit_update_info!(
+-                            app_name_for_progress_clone,
+-                            "\rReceiving objects: {:.1}% ({} / {}) ({}), indexing {} objects... ",
+-                            rounded_percent,
+-                            received_objects,
+-                            total_objects,
+-                            format_bytes(received_bytes),
+-                            indexed_objects
+-                        );
+-                        last_percent = rounded_percent;
+-                    }
+-                } else {
+-                    emit_update_info!(
+-                        app_name_for_progress_clone,
+-                        "\rReceiving objects: {} received ({} bytes), indexing {} objects... ",
+-                        received_objects,
+-                        received_bytes,
+-                        indexed_objects
+-                    );
+-                }
+-                io::stdout().flush().unwrap_or_default();
+-                true
+-            }
+-        });
++        callbacks.transfer_progress(create_transfer_progress_callback(app_name_for_progress_clone, "Receiving objects".to_string()));
+ 
+-        let mut fetch_options = create_fetch_options(callbacks, None);
++        let mut fetch_options = create_fetch_options(callbacks, None, None, Some(&url_for_clone_task));
          fetch_options.download_tags(git2::AutotagOption::All);
  
 -        let mut builder = git2::build::RepoBuilder::new();
@@ -406,10 +677,67 @@ index 8f4e3e3..0643dae 100644
  
          emit_info!(
              app_name_for_messages,
-@@ -1135,6 +1166,128 @@ mod tests {
+@@ -816,7 +930,7 @@ pub async fn checkout_version_tag(
+             "Fetching objects for tag".to_string(),
+         ));
+ 
+-        let mut fetch_options = create_fetch_options(callbacks, None);
++        let mut fetch_options = create_fetch_options(callbacks, None, Some(&repo), remote.url().ok());
+         fetch_options.prune(git2::FetchPrune::On);
+ 
+         let refspec = format!("+refs/tags/{0}:refs/tags/{0}", tag_to_checkout);
+@@ -1029,7 +1143,7 @@ pub async fn get_commit_messages_for_version_diff(
+         let mut callbacks = RemoteCallbacks::new();
+         configure_credentials(&mut callbacks, remote.url().ok());
+ 
+-        let mut fetch_options = create_fetch_options(callbacks, None);
++        let mut fetch_options = create_fetch_options(callbacks, None, Some(&repo), remote.url().ok());
+ 
+         let head_ref = repo.head().context("Failed to get repo HEAD")?;
+         let head_oid = head_ref.target().context("HEAD has no target OID")?;
+@@ -1135,6 +1249,167 @@ mod tests {
      use git2::{Repository, Signature};
      use std::cmp::Ordering;
  
++    #[test]
++    fn launcher_profiles_windows_proxy_respects_protocol_and_bypass() {
++        use super::select_windows_proxy as select;
++        assert_eq!(select("https://github.com/owner/repo.git", "127.0.0.1:10808", "<local>;*.internal"), Some("http://127.0.0.1:10808".into()));
++        let servers = "http=127.0.0.1:8001;https=127.0.0.1:8002";
++        assert_eq!(select("https://github.com/owner/repo.git", servers, ""), Some("http://127.0.0.1:8002".into()));
++        assert_eq!(select("http://github.com/owner/repo.git", servers, ""), Some("http://127.0.0.1:8001".into()));
++        assert_eq!(select("http://intranet/repo.git", servers, "<local>"), None);
++        assert_eq!(select("https://GitHub.com/repo.git", servers, "*.internal;github.com:443"), None);
++        assert_eq!(select("https://repo.internal/repo.git", servers, "*.internal"), None);
++        assert_eq!(select("file:///C:/fixtures/repo", servers, ""), None);
++        assert_eq!(select("https://github.com/repo.git", "http=127.0.0.1:8001", ""), None);
++        assert_eq!(select("https://github.com/repo.git", "", ""), None);
++    }
++
++    #[test]
++    fn launcher_profiles_interrupted_clone_recovers_without_replacing_valid_head() {
++        let root = std::env::temp_dir().join(format!("pyappify-unborn-{}", rand::random::<u64>()));
++        let repo = Repository::init(&root).unwrap();
++        let tree_id = repo.index().unwrap().write_tree().unwrap();
++        let tree = repo.find_tree(tree_id).unwrap();
++        let signature = Signature::now("fixture", "fixture@example.com").unwrap();
++        let first = repo.commit(None, &signature, &signature, "first", &tree, &[]).unwrap();
++        repo.tag_lightweight("v1.0.4", &repo.find_object(first, None).unwrap(), false).unwrap();
++        let next = repo.commit(None, &signature, &signature, "next", &tree, &[&repo.find_commit(first).unwrap()]).unwrap();
++        repo.tag_lightweight("v1.0.5", &repo.find_object(next, None).unwrap(), false).unwrap();
++        assert!(matches!(repo.head(), Err(error) if error.code() == git2::ErrorCode::UnbornBranch));
++        std::fs::write(root.join("partial-download-sentinel"), b"keep cached data").unwrap();
++        super::recover_unborn_repository_head(&repo).unwrap();
++        assert_eq!(repo.head().unwrap().target(), Some(next));
++        assert_eq!(std::fs::read(root.join("partial-download-sentinel")).unwrap(), b"keep cached data");
++        repo.set_head_detached(first).unwrap();
++        super::recover_unborn_repository_head(&repo).unwrap();
++        assert_eq!(repo.head().unwrap().target(), Some(first));
++        drop(tree);
++        drop(repo);
++        std::fs::remove_dir_all(root).unwrap();
++    }
++
 +    #[test]
 +    fn launcher_profiles_switch_independent_same_named_tags_and_module_providers() {
 +        use crate::utils::file::{remember_managed_repository_files, sync_managed_repository_files};
@@ -469,7 +797,7 @@ index 8f4e3e3..0643dae 100644
 +            repo.remote_set_url("origin", folder.to_str().unwrap()).unwrap();
 +            // The production All policy replaces colliding source tags; libgit2's
 +            // default auto-follow can retain the previous source's same-named tag.
-+            let mut options = super::create_fetch_options(git2::RemoteCallbacks::new(), None);
++            let mut options = super::create_fetch_options(git2::RemoteCallbacks::new(), None, Some(&repo), folder.to_str());
 +            options.prune(git2::FetchPrune::On);
 +            repo.find_remote("origin").unwrap().fetch(&super::PROFILE_FETCH_REFSPECS, Some(&mut options), None).unwrap();
 +            super::prune_deleted_local_tags_from_remote(&repo, "origin", "fixture").unwrap();

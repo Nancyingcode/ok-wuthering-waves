@@ -1,0 +1,76 @@
+{
+  "schema": 1,
+  "date": "2026-11-04",
+  "baseSourceCommit": "56528626905800696f686964ede3e231ac3e6ff2",
+  "testedBeforeCommit": true,
+  "patchSha256": "e5e78ea79c0f51a5b7ccfe618c6791ec5d4b7045035a600ce8eae57987298b4c",
+  "publicReleaseUpdated": false,
+  "rustTests": {
+    "passed": 13,
+    "failed": 0,
+    "ignored": 0,
+    "buildThenTest": true
+  },
+  "nodeTests": {
+    "distinctPassed": 140,
+    "failed": 0,
+    "firstRunPassed": 139,
+    "firstRunFailed": 1,
+    "failedIntegrationRetriedAndPassed": 1,
+    "firstFailure": "rustc missing from test shell PATH"
+  },
+  "typeScriptAndVitePassed": true,
+  "buildTestBundlePassed": true,
+  "cacheSchema": 2,
+  "launcherFingerprint": "b8c566e9772bf4d1a8552f82e40a40eb9847de835e5198664b35e485e9562b6e",
+  "artifacts": [
+    {
+      "bytes": 4019827,
+      "name": "ok-ww-personal-win32-setup.exe",
+      "sha256": "66be662aeaece7bd78605a0d0074a92e37b52100d3fe66b6094d15f8ecd7a09f"
+    },
+    {
+      "bytes": 5110286,
+      "name": "ok-ww-personal-win32.zip",
+      "sha256": "14ac8d185edcd7e3c6c8b3f3a63cd69b8a14ac211d026327fb4cda4fa7a464d4"
+    }
+  ],
+  "nativeProxy": {
+    "passed": true,
+    "startedAt": "2026-11-04T13:28:47.5152241Z",
+    "scope": "new actual EXE; Windows system proxy without proxy environment variables; fresh clone then interrupted clone recovery",
+    "proxyConnectionObserved": true,
+    "proxyEnvironmentCleared": true,
+    "exeSha256": "a11cb7c60380405d5864ff03fd3ac67e1bd335c10d6ee466cf687554739dd0da",
+    "freshClonePassed": true,
+    "head": "bc5467ba5a6ee959ce6aa7b444812f584f761c4d",
+    "cachedPacksPreserved": true,
+    "interruptedClonePassed": true,
+    "restoredOriginalGuiPid": 28452,
+    "finishedAt": "2026-11-04T13:29:32.8357110Z"
+  },
+  "installedFix": {
+    "passed": true,
+    "portableExeSha256": "a11cb7c60380405d5864ff03fd3ac67e1bd335c10d6ee466cf687554739dd0da",
+    "installedExeSha256": "2c4a46283075b16eac61aae9cb1edd66855fe722e364461cd51e90518dfb6871",
+    "cachedFilesAndUserDataPreserved": true,
+    "originalReleaseExeBackedUp": true,
+    "proxyEnvironmentCleared": true,
+    "finishedAt": "2026-11-04T13:31:20.4569104Z"
+  },
+  "installedRuntime": {
+    "version": "v1.0.5",
+    "profile": "Personal",
+    "installed": true,
+    "autoStart": false,
+    "running": false,
+    "pipCheckPassed": true,
+    "importsPassed": true,
+    "qt": "6.11.1"
+  },
+  "limitations": [
+    "Windows static proxy settings covered; PAC not added",
+    "Validation used local artifacts before source commit; no new public release or CI artifact",
+    "No game, NPU or real private configuration migration executed"
+  ]
+}
