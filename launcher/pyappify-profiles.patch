@@ -1,3 +1,21 @@
+diff --git a/src-tauri/nsis/installer.nsi b/src-tauri/nsis/installer.nsi
+index fe56e0e..9063998 100644
+--- a/src-tauri/nsis/installer.nsi
++++ b/src-tauri/nsis/installer.nsi
+@@ -1064,8 +1064,11 @@ Function KillInstallDirExecutables
+ 
+   retry_kill_install_dir_executables:
+   DetailPrint "Stopping running executables in $INSTDIR"
+-  ExecWait 'powershell.exe -NoProfile -ExecutionPolicy Bypass -File "$R0" "$INSTDIR" "$EXEPATH"' $R2
+-  ${If} $R2 <> 0
++  ; Hide the child at launch; PowerShell's own window style alone can flash.
++  nsExec::ExecToLog 'powershell.exe -NoLogo -NoProfile -NonInteractive -WindowStyle Hidden -ExecutionPolicy Bypass -File "$R0" "$INSTDIR" "$EXEPATH"'
++  Pop $R2
++  ; Plugin launch failures return "error", so compare the status as a string.
++  ${If} $R2 != 0
+     ${If} $LANGUAGE == 2052
+       MessageBox MB_ICONEXCLAMATION|MB_RETRYCANCEL "无法停止正在使用 $INSTDIR 中 Python/Qt 文件的进程。$\r$\n请关闭相关应用后点击“重试”。" IDRETRY retry_kill_install_dir_executables
+     ${Else}
 diff --git a/src-tauri/src/app.rs b/src-tauri/src/app.rs
 index fc2d5bc..0597623 100644
 --- a/src-tauri/src/app.rs
