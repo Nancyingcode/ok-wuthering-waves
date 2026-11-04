@@ -1,0 +1,456 @@
+{
+  "schema": 1,
+  "date": "2026-11-04",
+  "candidateBuild": {
+    "sha": "54f5a88ab1838dde334469686bbb41460e7614f6",
+    "runId": 41844467555,
+    "runUrl": "https://github.com/Nancyingcode/ok-wuthering-waves/actions/runs/41844467555"
+  },
+  "launcherInputs": {
+    "launcher/pyappify.personal.yml": "b9b4cc14fb23d9a053bf8fd93c4e3ba94efd368a9fe652140a3bcd5e8b43d4ad",
+    "launcher/pyappify-profiles.patch": "2632ca93999593bd0f6ae29b3823cf86d4f90f2d820078b0d7cad771516ffa42"
+  },
+  "launcherFingerprint": "adde9455e263da3f6a9befd813d06776b48d0ed97a9b4909adb48f9570e36fc6",
+  "launcherBuildTools": {
+    "cargo": "cargo 1.99.1 (5f94df478 2026-08-27)",
+    "imageOS": "win25-vs2026",
+    "imageVersion": "20261030.294.1",
+    "msvcInstallation": "18.11.12328.437",
+    "node": "v24.22.2",
+    "os": "win32/x64/10.0.26100",
+    "pnpm": "11.28.10",
+    "powershell": "PowerShell 7.6.9",
+    "rustc": "rustc 1.99.1 (58cf8f9c3 2026-10-13)\nbinary: rustc\ncommit-hash: 58cf8f9c35b355199727627d07ae34a4e2846d67\ncommit-date: 2026-10-13\nhost: x86_64-pc-windows-msvc\nrelease: 1.99.1\nLLVM version: 23.1.1"
+  },
+  "launcherArtifacts": [
+    {
+      "bytes": 4019887,
+      "name": "ok-ww-personal-win32-setup.exe",
+      "sha256": "9574e0ca8a5276c27ef037cbfb64f945a4662a705b7d1a6a08c09da1ad8a665b"
+    },
+    {
+      "bytes": 5110408,
+      "name": "ok-ww-personal-win32.zip",
+      "sha256": "d8f662c451c98b94fe5ff12564d9ae82e935b441ea05804720a7b84fe64b43a5"
+    }
+  ],
+  "portableExe": {
+    "sha256": "3dd1d32a567a853db666b42ef475e5b542fcdfbed3a627eba089bd15ccf97231",
+    "bytes": 10378752
+  },
+  "pythonValidation": {
+    "passed": true,
+    "modules": 72,
+    "testsRun": 1040,
+    "skipped": 8,
+    "sourceVerification": "raw Git blobs at immutable source SHA"
+  },
+  "runtimeBaseline": {
+    "runtimeRepository": "Nancyingcode/ok-ww-personal-update",
+    "version": "v1.0.5",
+    "runtimeCommit": "bc5467ba5a6ee959ce6aa7b444812f584f761c4d",
+    "businessSourceSha": "5c131778dfbe3e12a8d5d4174998b5ac8309476e",
+    "manifestHash": "25cd22213bf5f351de32db72e67f888b505fc0fc2fd67c65c3e69a0d71cea5a3",
+    "payloadHash": "5495007524cdcce3f53058bc08a8d4fbabc8c2163135a43df87146f8a27c9d16"
+  },
+  "checks": {
+    "coldInstall": true,
+    "pipCheck": true,
+    "imports": true,
+    "gui": true,
+    "templates": true,
+    "ocr": true,
+    "echo": true,
+    "sourceSwitch": true,
+    "userData": true
+  },
+  "windows": {
+    "downloadAndColdInstall": {
+      "passed": true,
+      "runId": 41844467555,
+      "sourceSha": "54f5a88ab1838dde334469686bbb41460e7614f6",
+      "startedAt": "2026-11-04T14:25:04.0977342Z",
+      "phase": "awaiting-gui-confirmation",
+      "root": "C:\\wwci6",
+      "proxyConnectionObserved": true,
+      "exeSha256": "3dd1d32a567a853db666b42ef475e5b542fcdfbed3a627eba089bd15ccf97231",
+      "proxyEnvironmentRemoved": true,
+      "gitColdPassed": true,
+      "gitHead": "bc5467ba5a6ee959ce6aa7b444812f584f761c4d",
+      "gitInterruptedPassed": true,
+      "gitCachedPacksPreserved": true,
+      "officialVersion": "v3.7.17",
+      "headlessPassed": true,
+      "guiPid": 8600,
+      "finishedAt": "2026-11-04T14:44:04.7564214Z"
+    },
+    "coldRuntime": {
+      "scope": "exact CI run 41844467555, source 54f5a88ab1838dde334469686bbb41460e7614f6; stable runtime v1.0.5 baseline",
+      "startedAt": "2026-11-04T14:25:47.2774464Z",
+      "phase": "complete",
+      "passed": true,
+      "proxyEnvironmentRemoved": true,
+      "freshClientCaches": true,
+      "launcherProcessId": 12456,
+      "setupExitCode": 0,
+      "app": {
+        "current_profile": "Personal",
+        "current_version": "v1.0.5",
+        "installed": true,
+        "auto_start": false,
+        "update_method": "MANUAL_UPDATE"
+      },
+      "finishedAt": "2026-11-04T14:38:41.3025085Z"
+    },
+    "sourceSwitch": {
+      "action": "RoundTrip",
+      "startedAt": "2026-11-04T14:38:41.9458658Z",
+      "phase": "complete",
+      "passed": true,
+      "steps": [
+        {
+          "name": "real-running-process-block",
+          "profile": "Official",
+          "exitCode": 1,
+          "app": {
+            "current_profile": "Personal",
+            "current_version": "v1.0.5",
+            "installed": true,
+            "auto_start": false
+          }
+        },
+        {
+          "name": "repair-existing-mixed-qt",
+          "profile": "Personal",
+          "exitCode": 0,
+          "app": {
+            "current_profile": "Personal",
+            "current_version": "v1.0.5",
+            "installed": true,
+            "auto_start": false
+          }
+        },
+        {
+          "name": "real-switch-1-Official",
+          "profile": "Official",
+          "exitCode": 0,
+          "app": {
+            "current_profile": "Official",
+            "current_version": "v3.7.17",
+            "installed": true,
+            "auto_start": false
+          },
+          "providers": {
+            "ok": "C:\\wwci6\\data\\apps\\ok-ww\\working\\ok\\__init__.py",
+            "pyappify": "C:\\wwci6\\data\\apps\\ok-ww\\working\\pyappify\\__init__.py",
+            "qt": "6.12.0"
+          },
+          "userDataPreserved": true
+        },
+        {
+          "name": "real-switch-2-Personal",
+          "profile": "Personal",
+          "exitCode": 0,
+          "app": {
+            "current_profile": "Personal",
+            "current_version": "v1.0.5",
+            "installed": true,
+            "auto_start": false
+          },
+          "providers": {
+            "ok": "C:\\wwci6\\data\\apps\\ok-ww\\python\\Lib\\site-packages\\ok\\__init__.py",
+            "pyappify": "C:\\wwci6\\data\\apps\\ok-ww\\python\\Lib\\site-packages\\pyappify\\__init__.py",
+            "qt": "6.11.1"
+          },
+          "userDataPreserved": true
+        }
+      ],
+      "runningProcessProtection": true,
+      "pythonExecutableReused": true,
+      "sentinels": [
+        {
+          "sha256": "C9C958F5EE3C6E1F9F0456E42645FEDD2C83B78F9E1F016C9B91B3CF3FC76D49",
+          "path": "configs/acceptance-settings.txt"
+        },
+        {
+          "sha256": "F813A60D3387E3043BC905180D25276365BD44DD57DC0286CB7ACA2C6B2F2064",
+          "path": "configs/custom_teams/acceptance-team.txt"
+        },
+        {
+          "sha256": "F5660043484409EC5A9A972267E26F128AA99B8EFB3C4A96DCB7C89315E2EA85",
+          "path": "ok_tasks/acceptance-script.txt"
+        },
+        {
+          "sha256": "D4D60CFC23C0FC9725626F299E721503F2C53ADDB122B5DDAD58B8B1537072F2",
+          "path": "cache/acceptance-resource.bin"
+        }
+      ],
+      "finishedAt": "2026-11-04T14:41:59.4254464Z"
+    },
+    "probes": {
+      "imports": {
+        "phase": "imports",
+        "python": "3.12.10",
+        "platform": "Windows-10-10.0.19045-SP0",
+        "passed": true,
+        "scope": "exact CI run 41844467555, source 54f5a88ab1838dde334469686bbb41460e7614f6; stable runtime v1.0.5 baseline",
+        "modules": {
+          "ok": "python/Lib/site-packages/ok/__init__.py",
+          "pyappify": "python/Lib/site-packages/pyappify/__init__.py",
+          "PySide6.QtWidgets": "python/Lib/site-packages/PySide6/QtWidgets.pyd",
+          "qfluentwidgets": "python/Lib/site-packages/qfluentwidgets/__init__.py",
+          "openvino": "python/Lib/site-packages/openvino/__init__.py",
+          "onnxocr.onnx_paddleocr": "python/Lib/site-packages/onnxocr/onnx_paddleocr.py",
+          "mcp": "python/Lib/site-packages/mcp/__init__.py",
+          "mcp.server.mcpserver": "python/Lib/site-packages/mcp/server/mcpserver/__init__.py",
+          "src.gui.CharacterCodeTab": "working/src/gui/CharacterCodeTab.py",
+          "src.gui.MultiAccountConfigTab": "working/src/gui/MultiAccountConfigTab.py",
+          "src.char.CustomCharLoader": "working/src/char/CustomCharLoader.py",
+          "config": "working/config.py"
+        },
+        "versions": {
+          "ok-script": "2.0.22",
+          "pyappify": "1.0.13",
+          "mcp": "2.3.0",
+          "PySide6": "6.11.1",
+          "onnxocr-ppocrv5": "0.0.22",
+          "openvino": "2026.3.0"
+        },
+        "mcp_constructed": true,
+        "seconds": 7.503
+      },
+      "templates": {
+        "phase": "templates",
+        "python": "3.12.10",
+        "platform": "Windows-10-10.0.19045-SP0",
+        "passed": true,
+        "scope": "exact CI run 41844467555, source 54f5a88ab1838dde334469686bbb41460e7614f6; stable runtime v1.0.5 baseline",
+        "loaded_features": 296,
+        "example_features": [
+          "Augusta",
+          "Augusta_jump_attack",
+          "Augusta_lib1",
+          "Augusta_lib2",
+          "a_garden_back",
+          "a_garden_restart",
+          "absorb_en_US",
+          "absorb_zh_CN",
+          "abyss_start_marker",
+          "abyss_tower_start_marker"
+        ],
+        "seconds": 2.318
+      },
+      "ocr": {
+        "phase": "ocr",
+        "python": "3.12.10",
+        "platform": "Windows-10-10.0.19045-SP0",
+        "passed": true,
+        "scope": "exact CI run 41844467555, source 54f5a88ab1838dde334469686bbb41460e7614f6; stable runtime v1.0.5 baseline",
+        "recognized": "[[[[[17.0, 53.0], [493.0, 53.0], [493.0, 127.0], [17.0, 127.0]], ('OKWW 12345', 0.9600410461425781)]]]",
+        "requested_parameters": {
+          "use_openvino": true,
+          "use_npu": true,
+          "rec_batch_num": 6,
+          "openvino_num_requests": 1,
+          "openvino_compile_config": {
+            "CPU": {},
+            "NPU": {}
+          }
+        },
+        "seconds": 2.271
+      },
+      "echo": {
+        "phase": "echo",
+        "python": "3.12.10",
+        "platform": "Windows-10-10.0.19045-SP0",
+        "passed": true,
+        "scope": "exact CI run 41844467555, source 54f5a88ab1838dde334469686bbb41460e7614f6; stable runtime v1.0.5 baseline",
+        "model_bytes": 37907104,
+        "input_shape": [
+          1,
+          3,
+          640,
+          640
+        ],
+        "inference_completed": true,
+        "detections": 0,
+        "seconds": 1.787
+      }
+    },
+    "postSwitchProbes": {
+      "imports": {
+        "phase": "imports",
+        "python": "3.12.10",
+        "platform": "Windows-10-10.0.19045-SP0",
+        "passed": true,
+        "scope": "exact CI run 41844467555, source 54f5a88ab1838dde334469686bbb41460e7614f6; stable runtime v1.0.5 baseline",
+        "modules": {
+          "ok": "python/Lib/site-packages/ok/__init__.py",
+          "pyappify": "python/Lib/site-packages/pyappify/__init__.py",
+          "PySide6.QtWidgets": "python/Lib/site-packages/PySide6/QtWidgets.pyd",
+          "qfluentwidgets": "python/Lib/site-packages/qfluentwidgets/__init__.py",
+          "openvino": "python/Lib/site-packages/openvino/__init__.py",
+          "onnxocr.onnx_paddleocr": "python/Lib/site-packages/onnxocr/onnx_paddleocr.py",
+          "mcp": "python/Lib/site-packages/mcp/__init__.py",
+          "mcp.server.mcpserver": "python/Lib/site-packages/mcp/server/mcpserver/__init__.py",
+          "src.gui.CharacterCodeTab": "working/src/gui/CharacterCodeTab.py",
+          "src.gui.MultiAccountConfigTab": "working/src/gui/MultiAccountConfigTab.py",
+          "src.char.CustomCharLoader": "working/src/char/CustomCharLoader.py",
+          "config": "working/config.py"
+        },
+        "versions": {
+          "ok-script": "2.0.22",
+          "pyappify": "1.0.13",
+          "mcp": "2.3.0",
+          "PySide6": "6.11.1",
+          "onnxocr-ppocrv5": "0.0.22",
+          "openvino": "2026.3.0"
+        },
+        "mcp_constructed": true,
+        "seconds": 16.945
+      },
+      "templates": {
+        "phase": "templates",
+        "python": "3.12.10",
+        "platform": "Windows-10-10.0.19045-SP0",
+        "passed": true,
+        "scope": "exact CI run 41844467555, source 54f5a88ab1838dde334469686bbb41460e7614f6; stable runtime v1.0.5 baseline",
+        "loaded_features": 296,
+        "example_features": [
+          "Augusta",
+          "Augusta_jump_attack",
+          "Augusta_lib1",
+          "Augusta_lib2",
+          "a_garden_back",
+          "a_garden_restart",
+          "absorb_en_US",
+          "absorb_zh_CN",
+          "abyss_start_marker",
+          "abyss_tower_start_marker"
+        ],
+        "seconds": 13.884
+      },
+      "ocr": {
+        "phase": "ocr",
+        "python": "3.12.10",
+        "platform": "Windows-10-10.0.19045-SP0",
+        "passed": true,
+        "scope": "exact CI run 41844467555, source 54f5a88ab1838dde334469686bbb41460e7614f6; stable runtime v1.0.5 baseline",
+        "recognized": "[[[[[17.0, 53.0], [493.0, 53.0], [493.0, 127.0], [17.0, 127.0]], ('OKWW 12345', 0.9600410461425781)]]]",
+        "requested_parameters": {
+          "use_openvino": true,
+          "use_npu": true,
+          "rec_batch_num": 6,
+          "openvino_num_requests": 1,
+          "openvino_compile_config": {
+            "CPU": {},
+            "NPU": {}
+          }
+        },
+        "seconds": 4.404
+      },
+      "echo": {
+        "phase": "echo",
+        "python": "3.12.10",
+        "platform": "Windows-10-10.0.19045-SP0",
+        "passed": true,
+        "scope": "exact CI run 41844467555, source 54f5a88ab1838dde334469686bbb41460e7614f6; stable runtime v1.0.5 baseline",
+        "model_bytes": 37907104,
+        "input_shape": [
+          1,
+          3,
+          640,
+          640
+        ],
+        "inference_completed": true,
+        "detections": 0,
+        "seconds": 2.7
+      }
+    },
+    "hiddenExecution": {
+      "passed": true,
+      "source": "actual NSIS cleanup invocation and error condition",
+      "templateSha256": "a22226d59f58c9c83ddddf34d244427bbad03a57abe3048879ac55f500a72d0d",
+      "cases": [
+        {
+          "name": "success",
+          "exitCode": "0",
+          "errorGuard": "success",
+          "parentConsole": {
+            "console": 103812152,
+            "visible": false,
+            "argumentsPreserved": true
+          },
+          "childConsole": {
+            "handle": "103812152",
+            "visible": false
+          }
+        },
+        {
+          "name": "script-failure",
+          "exitCode": "2",
+          "errorGuard": "failure",
+          "parentConsole": {
+            "console": 34214218,
+            "visible": false,
+            "argumentsPreserved": true
+          },
+          "childConsole": {
+            "handle": "34214218",
+            "visible": false
+          }
+        },
+        {
+          "name": "launch-failure",
+          "exitCode": "error",
+          "errorGuard": "failure"
+        }
+      ]
+    },
+    "nsis": {
+      "passed": true,
+      "startedAt": "2026-11-04T14:42:07.3944370Z",
+      "scope": "exact CI installer: fresh install, hidden process cleanup, /UPDATE and uninstall; restore original product registration",
+      "steps": [
+        {
+          "name": "fresh-install",
+          "exitCode": 0
+        },
+        {
+          "name": "update-and-hidden-process-cleanup",
+          "exitCode": 0
+        },
+        {
+          "name": "silent-uninstall-update-mode",
+          "exitCode": 0
+        }
+      ],
+      "portableExeSha256": "3dd1d32a567a853db666b42ef475e5b542fcdfbed3a627eba089bd15ccf97231",
+      "installedExeSha256": "8c74e9c243f4d106d47903a7fa5d95a1a17929a456189b54fa35e207750c327d",
+      "processCleanupPassed": true,
+      "userDataPreserved": true,
+      "originalUserExeUnchanged": true,
+      "originalRegistrationRestored": true,
+      "finishedAt": "2026-11-04T14:44:04.5066802Z"
+    },
+    "gui": {
+      "passed": true,
+      "method": "User manually confirmed the exact CI portable launcher after native screenshot capture timed out twice",
+      "windowTitle": "ok-ww - Official / Personal",
+      "executable": "C:\\wwci6\\ok-ww-personal.exe",
+      "exeSha256": "3dd1d32a567a853db666b42ef475e5b542fcdfbed3a627eba089bd15ccf97231",
+      "installedRuntimeBaseline": "v1.0.5",
+      "profile": "Personal",
+      "autoStart": false,
+      "userReply": "上述显示均正常",
+      "automatedScreenshot": false
+    }
+  },
+  "limitations": [
+    "Windows static system proxy validated; PAC support not added",
+    "Deep paths remain subject to Windows long-path policy",
+    "NSIS disposable uninstall used /UPDATE to preserve the original shared user settings",
+    "No game, NPU or real private user-data migration test",
+    "Visual GUI confirmation method is recorded separately; no claim of automated screenshot success"
+  ]
+}
