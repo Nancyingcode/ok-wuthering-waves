@@ -300,6 +300,8 @@ The patch keeps launcher profiles authoritative, switches the Git source before 
 
 运行仓库必须新建为空仓库，不 fork、不导入开发 refs 或 `.git`。只维护配置的一个分支和显式发布的版本标签。发布器拒绝开发历史、未知分支、非运行 manifest、同名 tag 身份冲突，以及 attributes/filter 改写后的字节差异；不 force push。两个发布 job 共用跨版本串行组，非快进竞争另有最多三次重新读取/重试，分支和 tag 使用 atomic push。
 
+运行提交的 author 和 committer 使用已核实的仓库所有者身份 `Nancyingcode <29879289+Nancyingcode@users.noreply.github.com>`，仅配置在受控临时仓库内，不改用户全局 Git 设置。提交署名与推送凭据分开处理，继承的 Git 作者/提交者环境变量不能覆盖该身份。旧运行 `v1.0.4` 使用过错误的 `runtime@users.noreply.github.com`；署名修正从后续新提交生效，不改写已公开的提交或 tag。
+
 `deploy.personal.txt` 递归保留运行源码、Qt/OCR/MCP 所需资源、`assets/templates`、`echo.onnx` 和翻译，不包含原图、测试、文档、工作流、开发队伍包或本地数据。requirements 直接来自业务 commit，原样保留，通过 pip 提供框架；不会调用 OCR 发布的内联准备逻辑，也不会复制 CI site-packages。当前 validate 中原有 OCR 轮子验证继续执行；这不能替代对原始 requirements 的真实目标源安装验证。
 
 导出与运行发布 dry-run（PowerShell，可直接运行；预览版本号不代表授权正式发布）：

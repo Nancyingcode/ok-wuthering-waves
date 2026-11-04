@@ -7,6 +7,10 @@ const { SOURCE_REPOSITORY, DISTRIBUTION_ID, MANIFEST, BUDGET, REQUIRED, RESOURCE
 
 const RUNTIME_REPOSITORY = 'Nancyingcode/ok-ww-personal-update';
 const RUNTIME_URL = `https://github.com/${RUNTIME_REPOSITORY}.git`;
+const RUNTIME_COMMIT_IDENTITY = {
+  name: 'Nancyingcode',
+  email: '29879289+Nancyingcode@users.noreply.github.com',
+};
 
 function validateConfiguration(repository, branch, root = path.resolve(__dirname, '../..')) {
   if (repository !== RUNTIME_REPOSITORY) throw new Error(`PERSONAL_RUNTIME_REPOSITORY must be ${RUNTIME_REPOSITORY}`);
@@ -131,7 +135,7 @@ function publishRuntime({ version, businessSourceSha, sourceBuildRunId, runtimeR
     env.GIT_CONFIG_GLOBAL = path.join(temporary, '.git/empty-config');
     for (const [key, value] of Object.entries({ 'core.autocrlf': 'false', 'core.longpaths': 'true',
       'core.attributesfile': env.GIT_CONFIG_GLOBAL, 'core.hooksPath': path.join(temporary, '.git/disabled-hooks'),
-      'user.name': 'Personal Runtime Publisher', 'user.email': 'runtime@users.noreply.github.com' })) run(['config', '--local', key, value]);
+      'user.name': RUNTIME_COMMIT_IDENTITY.name, 'user.email': RUNTIME_COMMIT_IDENTITY.email })) run(['config', '--local', key, value]);
     run(['remote', 'add', 'origin', remote]);
     const verifiedHistory = new Set();
     for (let attempt = 0; attempt < 3; attempt++) {

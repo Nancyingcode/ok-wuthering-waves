@@ -227,7 +227,12 @@ test('real pinned checkout: repeated Prepare is idempotent, stale state fails, r
   fs.mkdirSync(source, { recursive: true });
   fs.cpSync(path.join(integrationSource, '.git'), path.join(source, '.git'), { recursive: true });
   const tracked = execFileSync('git', ['-C', integrationSource, 'ls-files', '-z'], { encoding: 'utf8' }).split('\0').filter(Boolean);
-  for (const name of tracked) write(source, name, fs.readFileSync(path.join(integrationSource, name)));
+  // Newly added patch assets are untracked in the pinned upstream checkout.
+  // Include them so the copied prepared tree can pass the reverse-apply check.
+  const patchFiles = [...fs.readFileSync(path.join(ROOT, 'launcher/pyappify-profiles.patch'), 'utf8').matchAll(/^\+\+\+ b\/(.+)$/gm)]
+    .map(match => match[1].trim()).filter(name => fs.existsSync(path.join(integrationSource, name)));
+  const preparedFiles = [...new Set([...tracked, ...patchFiles])];
+  for (const name of preparedFiles) write(source, name, fs.readFileSync(path.join(integrationSource, name)));
   const cargoManifest = path.join(source, 'src-tauri/Cargo.toml');
   fs.writeFileSync(cargoManifest, fs.readFileSync(cargoManifest, 'utf8').replace(/\r?\n/g, '\r\n'));
   const prepare = () => execFileSync('pwsh', ['-NoProfile', '-File', path.join(root, 'scripts/build_personal_launcher.ps1'), '-Phase', 'Prepare'], { encoding: 'utf8' });
@@ -237,7 +242,7 @@ test('real pinned checkout: repeated Prepare is idempotent, stale state fails, r
   // checkout was CRLF. It must not invalidate the prepared input identity.
   writeIfChanged(cargoManifest, fs.readFileSync(cargoManifest, 'utf8').replace(/\r\n/g, '\n'));
   assert.equal(assertPrepared(root), beforeTauri);
-  const watched = [...tracked.map(name => path.join(source, name)),
+  const watched = [...preparedFiles.map(name => path.join(source, name)),
     ...INPUT_FILES.map(name => path.join(root, name)), path.join(root, 'build/launcher-metadata/prepared.json')];
   const before = watched.map(filename => [fs.statSync(filename).mtimeMs, fs.readFileSync(filename)]);
   prepare();

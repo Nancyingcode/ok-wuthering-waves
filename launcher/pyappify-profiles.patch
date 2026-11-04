@@ -73,7 +73,7 @@ index fc2d5bc..0597623 100644
      async fn atomically_replaces_existing_app_json() {
          let unique = std::time::SystemTime::now()
 diff --git a/src-tauri/src/app_service.rs b/src-tauri/src/app_service.rs
-index f8c43b2..f8e2b2d 100644
+index f8c43b2..138b17d 100644
 --- a/src-tauri/src/app_service.rs
 +++ b/src-tauri/src/app_service.rs
 @@ -181,6 +181,17 @@ async fn ensure_app_is_ready_to_start(app_name: &str) -> Result<()> {
@@ -201,17 +201,19 @@ index f8c43b2..f8e2b2d 100644
      tokio::fs::create_dir_all(&working_dir_path)
          .await
          .with_context(|| format!("Failed to create dir {}", working_dir_path.display()))?;
-@@ -976,6 +980,9 @@ pub async fn setup_app(app_name: &str, profile_name: &str) -> Result<(), Error>
+@@ -976,6 +980,11 @@ pub async fn setup_app(app_name: &str, profile_name: &str) -> Result<(), Error>
      if let Some(app) = app_guard.as_mut().filter(|app| app.name == app_name) {
          load_app_details(app).await?;
          app.installed = true;
++        app.current_version = Some(version.clone());
++        app.current_version_missing = false;
 +        app.update_state = AppUpdateState::Idle;
 +        app.update_target_version = None;
 +        app.update_error = None;
          app.current_profile = final_profile_name_to_set.clone();
          let app_to_save = app.clone();
          drop(app_guard);
-@@ -1206,15 +1213,24 @@ async fn ensure_app_stopped_for_update(app_name: &str) -> Result<(), Error> {
+@@ -1206,15 +1215,24 @@ async fn ensure_app_stopped_for_update(app_name: &str) -> Result<(), Error> {
  
  async fn update_to_version_inner(app_name: &str, version: &str) -> Result<(), Error> {
      let working_dir_path = get_app_working_dir_path(app_name);
@@ -238,7 +240,7 @@ index f8c43b2..f8e2b2d 100644
          }
      };
  
-@@ -1303,10 +1319,8 @@ async fn update_to_version_inner(app_name: &str, version: &str) -> Result<(), Er
+@@ -1303,10 +1321,8 @@ async fn update_to_version_inner(app_name: &str, version: &str) -> Result<(), Er
          let mut temp_app = read_embedded_app();
          temp_app.name = app_name.to_string();
          update_app_from_yml(&mut temp_app, &yml_path.to_string_lossy());
@@ -251,7 +253,7 @@ index f8c43b2..f8e2b2d 100644
      };
      let new_content = get_relevant_content(&new_requirements_spec, &working_dir_path);
  
-@@ -1623,6 +1637,12 @@ pub async fn start_app(app_handle: AppHandle, app_name: String) -> Result<(), Er
+@@ -1623,6 +1639,12 @@ pub async fn start_app(app_handle: AppHandle, app_name: String) -> Result<(), Er
      let _guard = app_dir_lock.lock().await;
      ensure_app_is_ready_to_start(&app_name).await?;
  
@@ -264,7 +266,7 @@ index f8c43b2..f8e2b2d 100644
      if !check_python_env_exists(&app_name) {
          warn!(
              "Python .venv not found for '{}'. Deleting app artifacts.",
-@@ -2069,6 +2089,33 @@ mod tests {
+@@ -2069,6 +2091,33 @@ mod tests {
          values.iter().map(|value| value.to_string()).collect()
      }
  
@@ -299,7 +301,7 @@ index f8c43b2..f8e2b2d 100644
          Profile {
              name: "default".to_string(),
 diff --git a/src-tauri/src/git.rs b/src-tauri/src/git.rs
-index 8f4e3e3..a4b83fc 100644
+index 8f4e3e3..0643dae 100644
 --- a/src-tauri/src/git.rs
 +++ b/src-tauri/src/git.rs
 @@ -111,6 +111,11 @@ fn parse_version_tag(tag_name: &str) -> Option<VersionKey> {
@@ -404,7 +406,7 @@ index 8f4e3e3..a4b83fc 100644
  
          emit_info!(
              app_name_for_messages,
-@@ -1135,6 +1166,124 @@ mod tests {
+@@ -1135,6 +1166,128 @@ mod tests {
      use git2::{Repository, Signature};
      use std::cmp::Ordering;
  
@@ -465,13 +467,17 @@ index 8f4e3e3..a4b83fc 100644
 +        ] {
 +            remember_managed_repository_files(&repo, &working).unwrap();
 +            repo.remote_set_url("origin", folder.to_str().unwrap()).unwrap();
-+            let mut options = git2::FetchOptions::new();
++            // The production All policy replaces colliding source tags; libgit2's
++            // default auto-follow can retain the previous source's same-named tag.
++            let mut options = super::create_fetch_options(git2::RemoteCallbacks::new(), None);
 +            options.prune(git2::FetchPrune::On);
 +            repo.find_remote("origin").unwrap().fetch(&super::PROFILE_FETCH_REFSPECS, Some(&mut options), None).unwrap();
 +            super::prune_deleted_local_tags_from_remote(&repo, "origin", "fixture").unwrap();
 +            let target = repo.revparse_single("refs/tags/v1.2.3").unwrap();
++            let selected_commit = target.peel_to_commit().unwrap().id();
++            assert_eq!(selected_commit, id);
 +            repo.checkout_tree(&target, Some(git2::build::CheckoutBuilder::new().force())).unwrap();
-+            repo.set_head_detached(id).unwrap();
++            repo.set_head_detached(selected_commit).unwrap();
 +            sync_managed_repository_files(&repo, &working).unwrap();
 +            assert_eq!(repo.head().unwrap().target(), Some(id));
 +            assert_eq!(fs::read_to_string(working.join("main.py")).unwrap(), label);
@@ -529,6 +535,67 @@ index 8f4e3e3..a4b83fc 100644
      fn commit_and_tag(repo: &Repository, root: &std::path::Path, tag: &str, message: &str) {
          let file_path = root.join("history.txt");
          std::fs::write(&file_path, format!("{tag}\n")).unwrap();
+diff --git a/src-tauri/src/python_env.rs b/src-tauri/src/python_env.rs
+index 57ab7c7..31876ec 100644
+--- a/src-tauri/src/python_env.rs
++++ b/src-tauri/src/python_env.rs
+@@ -24,6 +24,41 @@ use zip::ZipArchive;
+ 
+ pub const PIP_UPDATE_NEEDED_MARKER: &str = ".pip_update_needed.tmp";
+ 
++#[cfg(test)]
++mod profile_tests {
++    #[test]
++    fn launcher_profiles_reconcile_overlapping_qt_owners_without_cleaning_other_packages() {
++        let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
++        let local_python = root.join("../../../.venv/Scripts/python.exe");
++        let python = if local_python.exists() { local_python } else { "python".into() };
++        let probe = r##"
++import runpy, sys
++remove = runpy.run_path(sys.argv[1])["qt_packages_to_remove"]
++full = "PySide6==6.11.1\nshiboken6==6.11.1\n"
++minimal = "ok_pyside_minimal==6.12.0.post2\nshiboken6==6.12.0\n"
++installed = ["ok-pyside-minimal", "PySide6", "PySide6_Addons", "pyside6-essentials", "shiboken6", "user-plugin"]
++expected = ["ok-pyside-minimal", "pyside6", "pyside6-addons", "pyside6-essentials", "shiboken6"]
++assert remove(full, installed) == expected
++assert remove(minimal, installed) == expected
++assert remove(full, ["PySide6", "shiboken6", "user-plugin"]) == []
++assert remove(minimal, ["OK.PYSIDE.MINIMAL", "shiboken6"]) == []
++assert remove("# PySide6==1\n--index-url https://example.test\nnumpy==2", installed) == []
++assert remove(full, []) == []
++try:
++    remove(full + minimal, installed)
++except ValueError:
++    pass
++else:
++    raise AssertionError("Mixed Qt providers accepted")
++"##;
++        let output = std::process::Command::new(python)
++            .args(["-I", "-B", "-c", probe])
++            .arg(root.join("assets/reconcile_qt.py"))
++            .output().unwrap();
++        assert!(output.status.success(), "{}", String::from_utf8_lossy(&output.stderr));
++    }
++}
++
+ const KNOWN_PATCHES: [(&str, &str, &str, &str); 7] = [
+     ("3.13", "3.13.5", "https://www.python.org/ftp/python/3.13.5/python-3.13.5-amd64.zip", "https://mirrors.huaweicloud.com/python/3.13.5/python-3.13.5-amd64.zip"),
+     ("3.12", "3.12.10", "https://www.python.org/ftp/python/3.12.10/python-3.12.10-amd64.zip", "https://mirrors.huaweicloud.com/python/3.12.10/python-3.12.10-amd64.zip"),
+@@ -590,6 +625,14 @@ pub async fn install_requirements(
+     let marker_path = project_dir.join(PIP_UPDATE_NEEDED_MARKER);
+     fs::File::create(&marker_path).ok();
+ 
++    let mut reconcile = new_cmd(get_python_exe(app_name, false));
++    reconcile.current_dir(project_dir).args([
++        "-I", "-B", "-c", include_str!("../assets/reconcile_qt.py"), requirements,
++    ]);
++    reconcile.clear_python_envs();
++    command::run_command_and_stream_output(reconcile, app_name, "Reconcile profile Qt providers")
++        .await?;
++
+     command::run_command_and_stream_output(pip_install_cmd, app_name, &pip_install_desc).await?;
+ 
+     if marker_path.exists() {
 diff --git a/src-tauri/src/utils/error.rs b/src-tauri/src/utils/error.rs
 index 1a39f9b..1397e3d 100644
 --- a/src-tauri/src/utils/error.rs
@@ -833,3 +900,60 @@ index 97a33ea..52b89ae 100644
      #[cfg(windows)]
      #[test]
      fn retries_windows_file_mapping_and_lock_errors() {
+diff --git a/src-tauri/assets/reconcile_qt.py b/src-tauri/assets/reconcile_qt.py
+new file mode 100644
+--- /dev/null
++++ b/src-tauri/assets/reconcile_qt.py
+@@ -0,0 +1,52 @@
++import importlib.metadata
++from pathlib import Path
++import re
++import subprocess
++import sys
++import sysconfig
++
++
++QT_PACKAGES = {"ok-pyside-minimal", "pyside6", "pyside6-addons", "pyside6-essentials", "shiboken6"}
++FULL_QT = {"pyside6", "pyside6-addons", "pyside6-essentials"}
++
++
++def canonical_name(name):
++    return re.sub(r"[-_.]+", "-", name).lower()
++
++
++def qt_packages_to_remove(requirements, installed):
++    requested = set()
++    for line in requirements.splitlines():
++        match = re.match(r"^\s*([A-Za-z0-9][A-Za-z0-9_.-]*)(?=\s|\[|[<>=!~;@]|$)", line)
++        if match:
++            requested.add(canonical_name(match[1]))
++    wants_full = bool(requested & FULL_QT)
++    wants_minimal = "ok-pyside-minimal" in requested
++    if wants_full and wants_minimal:
++        raise ValueError("Requirements contain conflicting Qt providers")
++    installed = {canonical_name(name) for name in installed}
++    conflicting = (wants_full and "ok-pyside-minimal" in installed) or (
++        wants_minimal and bool(installed & FULL_QT)
++    )
++    if not conflicting:
++        return []
++    # Both distributions own PySide6 files. Remove the entire Qt group before
++    # reinstalling, or pip can keep metadata for files removed by the other owner.
++    # Retire this reconciliation when profiles no longer share a Python install.
++    return sorted(installed & QT_PACKAGES)
++
++
++def main():
++    spec = sys.argv[1]
++    requirements = Path(spec).read_text(encoding="utf-8-sig") if spec.endswith(".txt") else spec
++    installed = [dist.metadata["Name"] for dist in importlib.metadata.distributions(
++        path=[sysconfig.get_path("purelib")]
++    ) if dist.metadata["Name"]]
++    obsolete = qt_packages_to_remove(requirements, installed)
++    if obsolete:
++        print("Reconciling conflicting Qt providers: " + ", ".join(obsolete), flush=True)
++        subprocess.check_call([sys.executable, "-I", "-m", "pip", "uninstall", "--yes", *obsolete])
++
++
++if __name__ == "__main__":
++    main()

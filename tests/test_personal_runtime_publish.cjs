@@ -29,6 +29,28 @@ test('fresh runtime history excludes the development commit and confirms publish
   assert.throws(() => git(fixture.remote, 'cat-file', '-t', fixture.sha), /Command failed/);
 });
 
+test('runtime author and committer use the verified owner identity despite inherited Git overrides', t => {
+  const fixture = publishing(t);
+  const stage = fixture.stage();
+  const overrides = {
+    GIT_AUTHOR_NAME: 'Unrelated Author', GIT_AUTHOR_EMAIL: 'unrelated@example.com',
+    GIT_COMMITTER_NAME: 'Unrelated Committer', GIT_COMMITTER_EMAIL: 'runtime@users.noreply.github.com',
+  };
+  const previous = Object.fromEntries(Object.keys(overrides).map(key => [key, process.env[key]]));
+  try {
+    Object.assign(process.env, overrides);
+    const published = fixture.publish(stage);
+    assert.deepEqual(git(fixture.remote, 'show', '-s', '--format=%an%n%ae%n%cn%n%ce', published.runtimeCommit).split('\n'), [
+      'Nancyingcode', '29879289+Nancyingcode@users.noreply.github.com',
+      'Nancyingcode', '29879289+Nancyingcode@users.noreply.github.com',
+    ]);
+  } finally {
+    for (const [key, value] of Object.entries(previous)) {
+      if (value === undefined) delete process.env[key]; else process.env[key] = value;
+    }
+  }
+});
+
 test('E6: inherited CRLF and clean filter settings cannot alter published Git bytes', t => {
   const fixture = publishing(t);
   const config = path.join(fixture.root, 'global-gitconfig');

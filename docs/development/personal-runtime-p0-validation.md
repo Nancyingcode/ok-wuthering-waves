@@ -2,6 +2,10 @@
 
 验证日期：2026-11-04（Asia/Hong_Kong）。本记录区分代码实现、本地证据和实际部署，不能作为 Windows 冷安装验收记录。
 
+后续 Windows 工具安装、实际运行与全量回归见 [Windows 验收记录](personal-runtime-windows-validation.md)。下文保留初次交付时的环境和部署状态；运行仓库及凭据配置的后续进展以补充记录为准。
+
+用户授权上传后的运行 tag、真实公共源冷安装、来源往返及新版启动器修正见 [运行仓库续验记录](personal-runtime-remote-validation.md)。
+
 ## 基线与代码实现
 
 - 工作分支：`feat/personal/runtime-distribution`，从干净的 `personal` 建立；本地提交见该分支 Git 历史，未推送、未合并。
