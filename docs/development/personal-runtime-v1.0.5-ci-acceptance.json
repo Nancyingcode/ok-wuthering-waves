@@ -1,0 +1,244 @@
+{
+  "schema": 1,
+  "date": "2026-11-04",
+  "sourceBuild": {
+    "sha": "5c131778dfbe3e12a8d5d4174998b5ac8309476e",
+    "runId": 41826030867,
+    "url": "https://github.com/Nancyingcode/ok-wuthering-waves/actions/runs/41826030867",
+    "event": "workflow_dispatch"
+  },
+  "pythonValidation": {
+    "sourceSha": "5c131778dfbe3e12a8d5d4174998b5ac8309476e",
+    "runId": 41826030867,
+    "modules": 72,
+    "testsRun": 1040,
+    "skipped": 8,
+    "passed": true,
+    "sourceVerification": "raw Git blobs; runner uses LF, local Windows checkout may use CRLF",
+    "environment": "manual build uses original requirements; release OCR patch step skipped by workflow condition"
+  },
+  "runtimeBaseline": {
+    "repository": "Nancyingcode/ok-ww-personal-update",
+    "version": "v1.0.4",
+    "commit": "dc34ceffc28e35a660e90dde6b520ca811ae77f0",
+    "businessSourceSha": "9990eda3171b89facfad99426073d5d5728f37b2",
+    "manifestHash": "f0af9db0d196804bf831887f11d131b9c5100aa1ddf61f1166d1cc9a6a03295f",
+    "payloadHash": "5495007524cdcce3f53058bc08a8d4fbabc8c2163135a43df87146f8a27c9d16"
+  },
+  "launcherFingerprint": "057708f6bad2f282e402d46115c12dee329548ef4b56d272f21c0f00411f2c05",
+  "launcherInputs": {
+    "launcher/pyappify.personal.yml": "b9b4cc14fb23d9a053bf8fd93c4e3ba94efd368a9fe652140a3bcd5e8b43d4ad",
+    "launcher/pyappify-profiles.patch": "dcb482be53fa396071d5ee7a2a0c271481063603d140329e602017dd4d360524"
+  },
+  "launcherArtifacts": [
+    {
+      "bytes": 4013419,
+      "name": "ok-ww-personal-win32-setup.exe",
+      "sha256": "a13f1421cc53538696d666c92d7362b7be4fb6641697d624850ee2f4005ab941"
+    },
+    {
+      "bytes": 5104242,
+      "name": "ok-ww-personal-win32.zip",
+      "sha256": "2bf96b6a23915b2d86c168fd0c26144cf7c6de68916d06473270533739d332b8"
+    }
+  ],
+  "portableExe": {
+    "exeSha256": "822f734b1db1262f8f993b224b37a236420aefb37800856bb197c1318f954e62",
+    "bytes": 10371072,
+    "matchesPriorLocalExe": false
+  },
+  "checks": {
+    "coldInstall": true,
+    "pipCheck": true,
+    "imports": true,
+    "gui": true,
+    "templates": true,
+    "ocr": true,
+    "echo": true,
+    "sourceSwitch": true,
+    "userData": true
+  },
+  "windows": {
+    "coldInstall": {
+      "scope": "exact GitHub Actions run 41826030867 EXE; stable runtime v1.0.4 migration baseline",
+      "startedAt": "2026-11-04T12:15:56.7330420Z",
+      "phase": "complete",
+      "passed": true,
+      "freshClientCaches": true,
+      "launcherProcessId": 21868,
+      "setupExitCode": 0,
+      "app": {
+        "current_profile": "Personal",
+        "current_version": "v1.0.4",
+        "installed": true,
+        "auto_start": false,
+        "update_method": "MANUAL_UPDATE"
+      },
+      "finishedAt": "2026-11-04T12:24:23.9262266Z"
+    },
+    "sourceSwitch": {
+      "action": "RoundTrip",
+      "startedAt": "2026-11-04T12:24:24.4776210Z",
+      "phase": "complete",
+      "passed": true,
+      "steps": [
+        {
+          "name": "real-running-process-block",
+          "profile": "Official",
+          "exitCode": 1,
+          "app": {
+            "current_profile": "Personal",
+            "current_version": "v1.0.4",
+            "installed": true,
+            "auto_start": false
+          }
+        },
+        {
+          "name": "repair-existing-mixed-qt",
+          "profile": "Personal",
+          "exitCode": 0,
+          "app": {
+            "current_profile": "Personal",
+            "current_version": "v1.0.4",
+            "installed": true,
+            "auto_start": false
+          }
+        },
+        {
+          "name": "real-switch-1-Official",
+          "profile": "Official",
+          "exitCode": 0,
+          "app": {
+            "current_profile": "Official",
+            "current_version": "v3.7.17",
+            "installed": true,
+            "auto_start": false
+          },
+          "providers": {
+            "ok": "C:\\wwci5\\data\\apps\\ok-ww\\working\\ok\\__init__.py",
+            "pyappify": "C:\\wwci5\\data\\apps\\ok-ww\\working\\pyappify\\__init__.py",
+            "qt": "6.12.0"
+          },
+          "userDataPreserved": true
+        },
+        {
+          "name": "real-switch-2-Personal",
+          "profile": "Personal",
+          "exitCode": 0,
+          "app": {
+            "current_profile": "Personal",
+            "current_version": "v1.0.4",
+            "installed": true,
+            "auto_start": false
+          },
+          "providers": {
+            "ok": "C:\\wwci5\\data\\apps\\ok-ww\\python\\Lib\\site-packages\\ok\\__init__.py",
+            "pyappify": "C:\\wwci5\\data\\apps\\ok-ww\\python\\Lib\\site-packages\\pyappify\\__init__.py",
+            "qt": "6.11.1"
+          },
+          "userDataPreserved": true
+        }
+      ],
+      "runningProcessProtection": true,
+      "pythonExecutableReused": true,
+      "sentinels": [
+        {
+          "path": "configs/acceptance-settings.txt",
+          "sha256": "C9C958F5EE3C6E1F9F0456E42645FEDD2C83B78F9E1F016C9B91B3CF3FC76D49"
+        },
+        {
+          "path": "configs/custom_teams/acceptance-team.txt",
+          "sha256": "F813A60D3387E3043BC905180D25276365BD44DD57DC0286CB7ACA2C6B2F2064"
+        },
+        {
+          "path": "ok_tasks/acceptance-script.txt",
+          "sha256": "F5660043484409EC5A9A972267E26F128AA99B8EFB3C4A96DCB7C89315E2EA85"
+        },
+        {
+          "path": "cache/acceptance-resource.bin",
+          "sha256": "D4D60CFC23C0FC9725626F299E721503F2C53ADDB122B5DDAD58B8B1537072F2"
+        }
+      ],
+      "finishedAt": "2026-11-04T12:26:31.1867966Z"
+    },
+    "codeUpdateAndRollback": {
+      "scope": "actual final EXE; repository-local URL rewrite to private fixture; no public test tags",
+      "startedAt": "2026-11-04T12:26:31.8020960Z",
+      "passed": true,
+      "phase": "complete",
+      "steps": [
+        {
+          "response": {
+            "updated": true,
+            "version": "v9.9.9"
+          },
+          "name": "ci-v105-code-update",
+          "head": "e8c35a10a93f03fb19e48ecbc594bdd549da02b9",
+          "version": "v9.9.9"
+        },
+        {
+          "response": {
+            "updated": true,
+            "version": "v1.0.4"
+          },
+          "name": "ci-v105-code-rollback",
+          "head": "dc34ceffc28e35a660e90dde6b520ca811ae77f0",
+          "version": "v1.0.4"
+        }
+      ],
+      "pythonFilesUnchanged": true,
+      "pipCacheUnchanged": true,
+      "resourcesUnchanged": true,
+      "userDataUnchanged": true,
+      "resourceBytesUnchanged": true,
+      "rewriteRemoved": true,
+      "finalHead": "dc34ceffc28e35a660e90dde6b520ca811ae77f0",
+      "finalOrigin": "https://github.com/Nancyingcode/ok-ww-personal-update.git",
+      "finishedAt": "2026-11-04T12:26:46.1280977Z"
+    },
+    "nsis": {
+      "scope": "new final NSIS current-user install /UPDATE and uninstall; owned synthetic user data",
+      "passed": true,
+      "steps": [
+        {
+          "exitCode": 0,
+          "name": "first-install"
+        },
+        {
+          "exitCode": 0,
+          "name": "supported-same-version-update"
+        },
+        {
+          "exitCode": 0,
+          "name": "silent-uninstall"
+        }
+      ],
+      "portableExeSha256": "822f734b1db1262f8f993b224b37a236420aefb37800856bb197c1318f954e62",
+      "installedExeSha256": "b6129524053060297591f7131b9c5d63c7c26d75214f834fee24f35827397873",
+      "exactDifference": "Three bytes: sole Tauri bundle marker UNK -> NSS",
+      "sentinelsPreserved": true,
+      "registrationRemoved": true,
+      "finishedAt": "2026-11-04T12:27:18.8620707Z"
+    },
+    "gui": {
+      "passed": true,
+      "exeSha256": "822f734b1db1262f8f993b224b37a236420aefb37800856bb197c1318f954e62",
+      "path": "C:\\wwci5\\ok-ww-personal.exe",
+      "method": "CUA verified window executable path; native screenshot capture timed out; user supplied screenshot and manually refreshed version list",
+      "installedVersion": "v1.0.4",
+      "profile": "Personal",
+      "autoStart": false,
+      "initialObservation": "The private local update fixture v9.9.9 remained in app.json.available_versions after test cleanup; selecting its deleted tag caused update notes to fail with [object Object]",
+      "recovery": "User cancelled the update and refreshed the version list, reporting 没有找到其他版本. Disk configuration then contained only public v1.0.4; no private tag or local URL rewrite remained",
+      "gameStarted": false,
+      "limitations": [
+        "Native UI capture unavailable; visual observations rely on user screenshot and reply"
+      ]
+    }
+  },
+  "limitations": [
+    "Deep paths require Windows long-path support; short isolated path used",
+    "Bare /S same-version NSIS reinstall previously timed out; supported /UPDATE passed",
+    "No game, NPU or real private user-data migration test"
+  ]
+}

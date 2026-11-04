@@ -92,3 +92,22 @@
 Windows 已知边界仍为：裸 `/S` 同版本重装超时；深安装目录受系统路径策略限制，推荐使用已验证的短目录或默认安装目录（默认目录未单独冷安装测量）；游戏/NPU 和真实私人配置迁移未测。配置保留证据来自隔离环境的合成哨兵及此前人工队伍检查。
 
 全部后续汇总为 `build/windows-acceptance/final-summary.json`。测试客户端已恢复公共 Personal commit，局部 URL 重定向及私有客户端 tag 已移除；隔离数据和失败现场保留。新版启动器 GUI 留在桌面供用户查看，自动启动关闭。
+
+## v1.0.5 实际 CI 产物验收
+
+用户随后授权源码提交、push、新版本发布及重新启用 fork Actions。以上“未触发 CI”“尚需授权”及本地产物 hash 属于前轮时间点；本节记录正式发布前新完成的验收，不将构建成功等同于公开 Release。
+
+- [Build 41826030867](https://github.com/Nancyingcode/ok-wuthering-waves/actions/runs/41826030867) 已成功，业务源码为 `5c131778dfbe3e12a8d5d4174998b5ac8309476e`，对应不可变 tag `v1.0.5`。fork Actions 已按用户明确授权恢复；手动构建的 Publish job 按工作流条件跳过，正式发布使用 Publish Existing Build。
+- CI Python 在 72 模块中运行 1040 个用例，8 个跳过，无失败；不能称为“1040 个全部通过、零跳过”。Rust 专项 11 通过、0 失败、0 忽略。构建、测试、NSIS 和 ZIP 回执完整，schema 2 缓存验证保留，本次实际为无 exact hit 后重建。
+- 同一 CI run 的安装包与 ZIP 已下载并核验 GitHub artifact digest、配方、manifest、源 SHA 和回执。CI 产物不同于前轮本地二进制，因此在独立短目录 `C:\wwci5` 重新执行真实公共源冷安装、原始依赖 pip check、导入、296 模板、实际 OCR、echo CPU 推理、运行中保护、Official/Personal 往返、纯代码更新/回退、NSIS 安装/覆盖/卸载；均通过，缓存和合成用户数据保留。
+- 新 CI EXE 的界面由 CUA 核对进程路径，截图接口超时后由用户截图和人工操作确认：Personal、已安装 `v1.0.4`、自动启动关闭。私有更新 fixture 清理后，版本列表缓存曾残留 `v9.9.9`，请求已删除 tag 的说明失败；用户取消后正常刷新，版本缓存恢复为仅公开 `v1.0.4`，显示“没有找到其他版本”。测试 tag 未上传公开仓库，没有修改发布源码或覆盖现有 tag。
+
+| CI 文件 | 字节数 | SHA-256 |
+| --- | ---: | --- |
+| `ok-ww-personal.exe` | 10,371,072 | `822f734b1db1262f8f993b224b37a236420aefb37800856bb197c1318f954e62` |
+| `ok-ww-personal-win32-setup.exe` | 4,013,419 | `a13f1421cc53538696d666c92d7362b7be4fb6641697d624850ee2f4005ab941` |
+| `ok-ww-personal-win32.zip` | 5,104,242 | `2bf96b6a23915b2d86c168fd0c26144cf7c6de68916d06473270533739d332b8` |
+
+可审查的 [CI Windows 验收记录](personal-runtime-v1.0.5-ci-acceptance.json) 绑定上述实际附件、业务 run、原始 Git 配方字节及已公开运行 `v1.0.4` 的迁移基线。Windows 工作树可能转换 CRLF，输入 hash 使用构建提交的原始 Git blob 核对，没有放宽发布器的字节校验。迁移批准应引用该记录的不可变提交 URL，随后由 CI 实测 token 的跨仓库写入权限并发布。
+
+仍未验证的 Windows 范围：裸 `/S` 同版本重装超时、深目录系统长路径限制、游戏/NPU、真实私人配置迁移；原生界面截图自动化不可用，视觉结果依赖用户确认。公开 `v1.0.4` → 新版的实际更新需在新版运行 tag 发布后执行，不能用本地 fixture 代替。
