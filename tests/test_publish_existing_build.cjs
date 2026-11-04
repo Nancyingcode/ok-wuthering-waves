@@ -1,254 +1,191 @@
 const assert = require('node:assert/strict');
-const { createHash } = require('node:crypto');
-const fs = require('node:fs/promises');
-const os = require('node:os');
+const fs = require('node:fs');
 const path = require('node:path');
 const { test } = require('node:test');
 const { validateSource, publishRelease } = require('../.github/scripts/publish_existing_build.cjs');
+const { RUNTIME_REPOSITORY } = require('../.github/scripts/publish_personal_runtime.cjs');
+const { hash, json } = require('../scripts/export_personal_runtime.cjs');
+const { write, sourceFixture, launcherFixture } = require('./personal_runtime_fixture.cjs');
 
 const SHA = 'a'.repeat(40);
 const OTHER_SHA = 'b'.repeat(40);
 const CONTEXT = { repo: { owner: 'Nancyingcode', repo: 'ok-wuthering-waves' } };
-const SOURCE = {
-  version: 'v1.0.2', runId: 41366113840, sha: SHA, artifactId: 123,
-  runUrl: 'https://github.com/Nancyingcode/ok-wuthering-waves/actions/runs/41366113840',
-  prerelease: false,
-};
-
-function apiFixture(overrides = {}) {
-  const notFound = () => { throw Object.assign(new Error('Not found'), { status: 404 }); };
-  const state = {
-    run: {
-      head_sha: SHA, status: 'completed', conclusion: 'success', event: 'workflow_dispatch',
-      path: '.github/workflows/build.yml', html_url: SOURCE.runUrl,
-      repository: { full_name: 'Nancyingcode/ok-wuthering-waves' },
-      head_repository: { full_name: 'Nancyingcode/ok-wuthering-waves' },
-    },
-    comparison: 'identical',
-    artifacts: [{ id: 123, name: 'release-assets', expired: false, workflow_run: { head_sha: SHA } }],
-    existingRelease: null,
-    taggedSha: null,
-    failUpload: false,
-    ...overrides,
-  };
+const SOURCE = { version: 'v1.0.4', runId: 123, sha: SHA, artifactId: 1, metadataArtifactId: 2,
+  runUrl: 'https://github.com/Nancyingcode/ok-wuthering-waves/actions/runs/123', prerelease: false };
+function apiFixture() {
+  const missing = () => { throw Object.assign(new Error('Not found'), { status: 404 }); };
+  const state = { run: { head_sha: SHA, status: 'completed', conclusion: 'success', event: 'workflow_dispatch',
+    path: '.github/workflows/build.yml', html_url: SOURCE.runUrl, repository: { full_name: 'Nancyingcode/ok-wuthering-waves' },
+    head_repository: { full_name: 'Nancyingcode/ok-wuthering-waves' } }, comparison: 'ahead',
+    artifacts: [{ id: 1, name: 'release-assets', expired: false, workflow_run: { head_sha: SHA } },
+      { id: 2, name: 'launcher-build-metadata', expired: false, workflow_run: { head_sha: SHA } }],
+    release: null, taggedSha: null, assets: [], failUpload: false, failPublic: false };
   const writes = [];
-  const uploadData = new Map();
-  const github = {
-    rest: {
-      actions: {
-        getWorkflowRun: async () => ({ data: state.run }),
-        listWorkflowRunArtifacts: async () => {},
+  const github = { rest: { actions: { getWorkflowRun: async () => ({ data: state.run }), listWorkflowRunArtifacts() {} },
+    repos: { compareCommits: async () => ({ data: { status: state.comparison } }),
+      getReleaseByTag: async () => state.release ? { data: state.release } : missing(),
+      getCommit: async () => ({ data: { sha: state.taggedSha } }), listReleaseAssets() {},
+      createRelease: async params => { writes.push('draft'); state.release = { ...params, id: 456, body: params.body, html_url: 'https://github.com/example/release' }; return { data: state.release }; },
+      uploadReleaseAsset: async params => {
+        writes.push(`upload:${params.name}`);
+        if (state.failUpload) throw new Error('Upload failed');
+        state.assets.push({ id: state.assets.length, name: params.name, size: params.data.length, digest: `sha256:${hash(params.data)}`, data: params.data });
+        return { data: state.assets.at(-1) };
       },
-      repos: {
-        compareCommits: async () => ({ data: { status: state.comparison } }),
-        getReleaseByTag: async () => state.existingRelease ? { data: state.existingRelease } : notFound(),
-        getCommit: async () => {
-          if (state.taggedSha) return { data: { sha: state.taggedSha } };
-          throw Object.assign(new Error('No commit found for SHA: refs/tags/v1.0.2'), { status: 422 });
-        },
-        createRelease: async params => {
-          writes.push(['draft', params]);
-          return { data: { id: 456 } };
-        },
-        uploadReleaseAsset: async params => {
-          writes.push(['upload', params.name]);
-          if (state.failUpload) throw new Error('Upload failed');
-          uploadData.set(params.name, params.data);
-        },
-        updateRelease: async params => {
-          writes.push(['publish', params]);
-          return { data: { html_url: 'https://github.com/example/release' } };
-        },
-      },
-      git: {
-        getRef: async () => state.taggedSha ? { data: { object: { type: 'tag', sha: OTHER_SHA } } } : notFound(),
-        createTag: async params => {
-          writes.push(['tag', params]);
-          return { data: { sha: OTHER_SHA } };
-        },
-        createRef: async params => { writes.push(['ref', params]); },
-      },
-    },
-    paginate: async () => state.artifacts,
-  };
-  return { github, state, writes, uploadData };
+      getReleaseAsset: async params => ({ data: state.assets.find(asset => asset.id === params.asset_id).data }),
+      updateRelease: async params => { writes.push('public'); if (state.failPublic) throw new Error('Publication failed'); Object.assign(state.release, params); return { data: state.release }; },
+    }, git: {
+      getRef: async () => state.taggedSha ? { data: { object: { sha: OTHER_SHA, type: 'tag' } } } : missing(),
+      createTag: async params => { writes.push('tag'); state.taggedSha = params.object; return { data: { sha: OTHER_SHA } }; },
+      createRef: async () => { writes.push('ref'); },
+    } }, paginate: async method => method === github.rest.actions.listWorkflowRunArtifacts ? state.artifacts : state.assets };
+  return { github, state, writes };
 }
+const validate = (fixture, inputs = {}) => validateSource({ github: fixture.github, context: CONTEXT,
+  version: SOURCE.version, runId: SOURCE.runId, ...inputs });
 
-async function assetsFixture(t) {
-  const tempRoot = path.resolve(os.tmpdir());
-  const directory = await fs.mkdtemp(path.join(tempRoot, 'publish-existing-build-'));
-  t.after(() => {
-    assert.equal(path.dirname(path.resolve(directory)), tempRoot);
-    assert.ok(path.basename(directory).startsWith('publish-existing-build-'));
-    return fs.rm(directory, { recursive: true, force: true });
-  });
-  await fs.writeFile(path.join(directory, 'ok-ww-personal-win32-setup.exe'), 'abc');
-  await fs.writeFile(path.join(directory, 'ok-ww-personal-win32.zip'), Buffer.from([0, 255, 13, 10]));
-  return directory;
-}
-
-function validate(fixture, inputs = {}) {
-  return validateSource({ github: fixture.github, context: CONTEXT, version: SOURCE.version, runId: SOURCE.runId, ...inputs });
-}
-
-test('a completed same-repository build selects its original commit and artifact', async () => {
-  const fixture = apiFixture({ comparison: 'ahead' });
-  assert.deepEqual(await validate(fixture), SOURCE);
-  assert.deepEqual(fixture.writes, []);
-});
-
-test('a missing tag does not reach the commits API that returns 422', async () => {
+test('selected successful build retains business SHA and downloads assets plus metadata from that same run', async () => {
   const fixture = apiFixture();
-  let commitLookups = 0;
-  fixture.github.rest.git.getRef = async params => {
-    assert.deepEqual(params, { ...CONTEXT.repo, ref: 'tags/v1.0.2' });
-    throw Object.assign(new Error('Reference does not exist'), { status: 404 });
-  };
-  fixture.github.rest.repos.getCommit = async () => {
-    commitLookups++;
-    throw Object.assign(new Error('No commit found for SHA: refs/tags/v1.0.2'), { status: 422 });
-  };
   assert.deepEqual(await validate(fixture), SOURCE);
-  assert.equal(commitLookups, 0);
   assert.deepEqual(fixture.writes, []);
 });
-
-for (const status of [403, 422]) {
-  test(`tag reference API error ${status} is not mistaken for an absent tag`, async () => {
-    const fixture = apiFixture();
-    fixture.github.rest.git.getRef = async () => { throw Object.assign(new Error('Reference lookup failed'), { status }); };
-    await assert.rejects(validate(fixture), /Reference lookup failed/);
-    assert.deepEqual(fixture.writes, []);
-  });
-}
-
-test('prerelease versions are identified without shell evaluation', async () => {
-  const result = await validate(apiFixture(), { version: 'v1.0.3-beta.1' });
-  assert.equal(result.prerelease, true);
-});
-
-for (const version of ['personal', 'v01.0.2', 'v1.0', 'v1.0.2; echo test', '../v1.0.2']) {
-  test(`invalid version is rejected: ${version}`, async () => {
-    await assert.rejects(validate(apiFixture(), { version }), /Version must/);
-  });
-}
-
-for (const runId of ['-1', '12abc', '1.5', '9007199254740992']) {
-  test(`invalid run ID is rejected: ${runId}`, async () => {
-    await assert.rejects(validate(apiFixture(), { runId }), /Run ID/);
-  });
-}
-
-for (const [name, modify, error] of [
-  ['failed build', f => { f.state.run.conclusion = 'failure'; }, /completed successfully/],
-  ['unfinished build', f => { f.state.run.status = 'in_progress'; }, /completed successfully/],
-  ['different workflow', f => { f.state.run.path = '.github/workflows/test.yml'; }, /Windows Release/],
-  ['fork build', f => { f.state.run.head_repository.full_name = 'someone/fork'; }, /fork or pull request/],
-  ['pull request build', f => { f.state.run.event = 'pull_request'; }, /fork or pull request/],
-  ['invalid commit SHA', f => { f.state.run.head_sha = 'personal'; }, /invalid commit SHA/],
-  ['unmerged commit', f => { f.state.comparison = 'behind'; }, /merged into personal/],
-  ['diverged commit', f => { f.state.comparison = 'diverged'; }, /merged into personal/],
-  ['expired artifact', f => { f.state.artifacts[0].expired = true; }, /unexpired/],
-  ['missing artifact', f => { f.state.artifacts = []; }, /unexpired/],
-  ['ambiguous artifacts', f => { f.state.artifacts.push({ ...f.state.artifacts[0], id: 124 }); }, /exactly one/],
-  ['artifact from another commit', f => { f.state.artifacts[0].workflow_run.head_sha = OTHER_SHA; }, /Artifact commit/],
-  ['existing release', f => { f.state.existingRelease = { id: 789 }; }, /already exists/],
-  ['conflicting tag', f => { f.state.taggedSha = OTHER_SHA; }, /not source build commit/],
+for (const [name, change, expected] of [
+  ['failed', f => { f.state.run.conclusion = 'failure'; }, /successfully/],
+  ['unfinished', f => { f.state.run.status = 'in_progress'; }, /successfully/],
+  ['wrong workflow', f => { f.state.run.path = 'other'; }, /Windows Release/],
+  ['fork', f => { f.state.run.head_repository.full_name = 'other/repo'; }, /fork or pull request/],
+  ['PR', f => { f.state.run.event = 'pull_request'; }, /fork or pull request/],
+  ['bad sha', f => { f.state.run.head_sha = 'personal'; }, /invalid commit SHA/],
+  ['unmerged', f => { f.state.comparison = 'behind'; }, /merged into personal/],
+  ['diverged', f => { f.state.comparison = 'diverged'; }, /merged into personal/],
+  ['expired asset', f => { f.state.artifacts[0].expired = true; }, /release-assets/],
+  ['missing metadata', f => { f.state.artifacts.pop(); }, /launcher-build-metadata/],
+  ['ambiguous metadata', f => { f.state.artifacts.push({ ...f.state.artifacts[1], id: 3 }); }, /launcher-build-metadata/],
+  ['expired metadata', f => { f.state.artifacts[1].expired = true; }, /launcher-build-metadata/],
+  ['other metadata source', f => { f.state.artifacts[1].workflow_run.head_sha = OTHER_SHA; }, /metadata commit/],
+  ['other asset source', f => { f.state.artifacts[0].workflow_run.head_sha = OTHER_SHA; }, /Artifact commit/],
+  ['conflicting source tag', f => { f.state.taggedSha = OTHER_SHA; }, /not source build/],
 ]) {
-  test(`${name} cannot be published`, async () => {
-    const fixture = apiFixture();
-    modify(fixture);
-    await assert.rejects(validate(fixture), error);
+  test(`${name} refuses all external writes`, async () => {
+    const fixture = apiFixture(); change(fixture);
+    await assert.rejects(validate(fixture), expected);
     assert.deepEqual(fixture.writes, []);
   });
 }
-
-test('API permission errors are not mistaken for a missing release', async () => {
-  const fixture = apiFixture();
-  fixture.github.rest.repos.getReleaseByTag = async () => { throw Object.assign(new Error('Forbidden'), { status: 403 }); };
-  await assert.rejects(validate(fixture), /Forbidden/);
-});
-
-test('publishing uploads original bytes and matching SHA256 before making a release public', async t => {
-  const directory = await assetsFixture(t);
-  const fixture = apiFixture();
-  await publishRelease({ github: fixture.github, context: CONTEXT, source: SOURCE, directory });
-  assert.deepEqual(fixture.writes.map(([operation]) => operation), ['tag', 'ref', 'draft', 'upload', 'upload', 'upload', 'publish']);
-  assert.equal(fixture.writes[0][1].object, SHA);
-  assert.equal(fixture.writes[1][1].sha, OTHER_SHA);
-  const draft = fixture.writes[2][1];
-  assert.equal(draft.target_commitish, SHA);
-  assert.equal(draft.draft, true);
-  assert.equal(draft.prerelease, false);
-  assert.match(draft.body, /41366113840/);
-
-  const manifest = fixture.uploadData.get('SHA256SUMS.txt').toString('utf8');
-  assert.match(manifest, /^ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad  ok-ww-personal-win32-setup\.exe\n/);
-  assert.equal(manifest.trimEnd().split('\n').length, 2);
-  for (const [name, data] of fixture.uploadData) {
-    assert.deepEqual(data, await fs.readFile(path.join(directory, name)));
-    if (name !== 'SHA256SUMS.txt') {
-      const digest = createHash('sha256').update(data).digest('hex');
-      assert.ok(manifest.includes(`${digest}  ${name}\n`));
-    }
-  }
-});
-
-test('a matching existing tag is reused without moving it', async t => {
-  const fixture = apiFixture({ taggedSha: SHA });
-  await publishRelease({ github: fixture.github, context: CONTEXT, source: SOURCE, directory: await assetsFixture(t) });
-  assert.equal(fixture.writes.some(([operation]) => ['tag', 'ref'].includes(operation)), false);
-});
-
-test('prerelease publication cannot become the latest stable release', async t => {
-  const fixture = apiFixture();
-  const source = { ...SOURCE, version: 'v1.0.3-beta.1', prerelease: true };
-  await publishRelease({ github: fixture.github, context: CONTEXT, source, directory: await assetsFixture(t) });
-  assert.equal(fixture.writes.find(([operation]) => operation === 'draft')[1].prerelease, true);
-  assert.equal(fixture.writes.find(([operation]) => operation === 'publish')[1].make_latest, 'false');
-});
-
-test('a release created after preflight is not overwritten', async t => {
-  const fixture = apiFixture();
-  const source = await validate(fixture);
-  fixture.state.existingRelease = { id: 789 };
-  await assert.rejects(publishRelease({ github: fixture.github, context: CONTEXT, source, directory: await assetsFixture(t) }), /already exists/);
-  assert.deepEqual(fixture.writes, []);
-});
-
-test('a tag moved after preflight is not overwritten', async t => {
-  const fixture = apiFixture();
-  const source = await validate(fixture);
-  fixture.state.taggedSha = OTHER_SHA;
-  await assert.rejects(publishRelease({ github: fixture.github, context: CONTEXT, source, directory: await assetsFixture(t) }), /not source build commit/);
-  assert.deepEqual(fixture.writes, []);
-});
-
-test('a supplied checksum is replaced with a digest of the actual uploaded bytes', async t => {
-  const fixture = apiFixture();
-  const directory = await assetsFixture(t);
-  await fs.writeFile(path.join(directory, 'SHA256SUMS.txt'), 'incorrect supplied checksum');
-  await publishRelease({ github: fixture.github, context: CONTEXT, source: SOURCE, directory });
-  const manifest = fixture.uploadData.get('SHA256SUMS.txt').toString('utf8');
-  assert.equal(manifest.includes('incorrect supplied checksum'), false);
-  assert.match(manifest, /^ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad /);
-});
-
-test('failed uploads keep the release unpublished', async t => {
-  const fixture = apiFixture({ failUpload: true });
-  await assert.rejects(publishRelease({ github: fixture.github, context: CONTEXT, source: SOURCE, directory: await assetsFixture(t) }), /Upload failed/);
-  assert.equal(fixture.writes.some(([operation]) => operation === 'publish'), false);
-});
-
-for (const kind of ['missing', 'empty', 'unexpected']) {
-  test(`${kind} assets are rejected before creating a tag or release`, async t => {
-    const directory = await assetsFixture(t);
-    const installer = path.join(directory, 'ok-ww-personal-win32-setup.exe');
-    if (kind === 'missing') await fs.unlink(installer);
-    if (kind === 'empty') await fs.writeFile(installer, '');
-    if (kind === 'unexpected') await fs.writeFile(path.join(directory, 'unexpected.exe'), 'extra');
+for (const version of ['personal', 'v1.0', 'v1.0.4-preview.foo', 'v1.0.4; echo test', '../v1.0.4']) {
+  test(`uninstallable/unsafe version ${version} fails before writes`, async () => {
     const fixture = apiFixture();
-    await assert.rejects(publishRelease({ github: fixture.github, context: CONTEXT, source: SOURCE, directory }));
+    await assert.rejects(validate(fixture, { version }), /Version must/);
+    assert.deepEqual(fixture.writes, []);
+  });
+}
+for (const runId of ['-1', '12abc', '1.5', '9007199254740992']) {
+  test(`invalid run ID ${runId} is rejected`, async () => await assert.rejects(validate(apiFixture(), { runId }), /Run ID/));
+}
+for (const status of [403, 422]) {
+  test(`reference API ${status} is not treated as missing`, async () => {
+    const fixture = apiFixture();
+    fixture.github.rest.git.getRef = async () => { throw Object.assign(new Error('lookup failure'), { status }); };
+    await assert.rejects(validate(fixture), /lookup failure/);
+  });
+}
+test('missing tag avoids commits API 422; rc prerelease is installable', async () => {
+  const fixture = apiFixture();
+  fixture.github.rest.repos.getCommit = async () => { throw new Error('must not resolve an absent tag'); };
+  assert.equal((await validate(fixture, { version: 'v1.0.4-rc.1' })).prerelease, true);
+});
+
+function releaseFixture(t, overrides = {}) {
+  const business = sourceFixture(t);
+  const source = { ...SOURCE, sha: business.sha, ...overrides };
+  const launcher = launcherFixture(business.root, source);
+  const staged = business.stage(source.version, source.sha);
+  const api = apiFixture();
+  let runtimeComplete = false;
+  const publish = options => publishRelease({ github: api.github, context: CONTEXT, source, ...launcher,
+    staged, root: path.resolve(__dirname, '..'),
+    runtimeOptions: { runtimeRepository: RUNTIME_REPOSITORY, runtimeBranch: 'main', token: 'fixture-only' },
+    runtimePublisher: async input => {
+      api.writes.push('runtime');
+      assert.equal(input.businessSourceSha, source.sha);
+      assert.notEqual(input.launcherManifest.source.sha, source.sha);
+      runtimeComplete = true;
+      return { runtimeCommit: 'c'.repeat(40), manifestHash: staged.report.manifest_sha256, phase: 'runtime-confirmed' };
+    },
+    migrationCheck: async () => { assert.equal(runtimeComplete, true); api.writes.push('smoke'); },
+    ...options,
+  });
+  return { ...api, ...launcher, ...business, source, staged, publish };
+}
+test('P1/P4: draft assets precede runtime; confirmed runtime and Windows acceptance precede public launcher', async t => {
+  const fixture = releaseFixture(t);
+  await fixture.publish();
+  assert.deepEqual(fixture.writes, ['tag', 'ref', 'draft', 'upload:ok-ww-personal-win32-setup.exe',
+    'upload:ok-ww-personal-win32.zip', 'upload:SHA256SUMS.txt', 'runtime', 'smoke', 'public']);
+  for (const asset of fixture.state.assets) assert.deepEqual(asset.data, fs.readFileSync(path.join(fixture.directory, asset.name)));
+  assert.equal(fixture.state.taggedSha, fixture.source.sha);
+});
+test('P2: old URL launcher metadata rejects before any tag or release', async t => {
+  const fixture = releaseFixture(t);
+  fixture.manifest.inputs.prepared.files['launcher/pyappify.personal.yml'] = hash('old URL');
+  write(fixture.metadataDirectory, 'manifest.json', json(fixture.manifest));
+  await assert.rejects(fixture.publish(), /fingerprint|migration input/);
+  assert.deepEqual(fixture.writes, []);
+});
+test('P4: missing Windows approval retains the complete draft and runtime tag', async t => {
+  const fixture = releaseFixture(t);
+  const { confirmMigration } = require('../.github/scripts/personal_release_contract.cjs');
+  await assert.rejects(fixture.publish({ migrationCheck: parameters => confirmMigration({ ...parameters, approval: '' }) }), /remains draft/);
+  assert.equal(fixture.state.release.draft, true);
+  assert.equal(fixture.writes.includes('runtime'), true);
+  assert.equal(fixture.writes.includes('public'), false);
+});
+for (const stage of ['upload', 'runtime', 'public']) {
+  test(`P4: recover ${stage} failure using matching draft without duplicate or modified assets`, async t => {
+    const fixture = releaseFixture(t);
+    if (stage === 'upload') fixture.state.failUpload = true;
+    if (stage === 'public') fixture.state.failPublic = true;
+    const options = stage === 'runtime' ? { runtimePublisher: async () => { throw new Error('Runtime push failed'); } } : {};
+    await assert.rejects(fixture.publish(options), /failed/i);
+    assert.equal(fixture.state.release.draft, true);
+    if (stage === 'upload') assert.equal(fixture.writes.includes('runtime'), false);
+    fixture.state.failUpload = false; fixture.state.failPublic = false;
+    await fixture.publish();
+    assert.equal(fixture.state.release.draft, false);
+    assert.equal(fixture.state.assets.length, 3);
+    const count = fixture.writes.length;
+    await fixture.publish();
+    assert.deepEqual(fixture.writes.slice(count), ['runtime']);
+  });
+}
+test('P3: conflicting draft provenance or existing asset digest is preserved and rejected', async t => {
+  const fixture = releaseFixture(t);
+  fixture.state.failPublic = true;
+  await assert.rejects(fixture.publish());
+  fixture.state.failPublic = false;
+  fixture.state.assets[0].digest = 'sha256:' + '0'.repeat(64);
+  await assert.rejects(fixture.publish(), /asset hash conflict/);
+  fixture.state.release.body = '<!-- personal-runtime:other -->';
+  await assert.rejects(fixture.publish(), /provenance or assets conflict/);
+  assert.equal(fixture.state.release.draft, true);
+});
+test('P5: end-to-end dry-run verifies source/artifacts without calling the GitHub mutation API', async t => {
+  const fixture = releaseFixture(t);
+  const { publishRuntime } = require('../.github/scripts/publish_personal_runtime.cjs');
+  const result = await fixture.publish({ dryRun: true, runtimePublisher: publishRuntime });
+  assert.equal(result.externalWrites, false);
+  assert.equal(result.businessSourceSha, fixture.source.sha);
+  assert.deepEqual(fixture.writes, []);
+});
+for (const kind of ['missing', 'empty', 'unexpected', 'altered']) {
+  test(`${kind} artifacts reject before external writes`, async t => {
+    const fixture = releaseFixture(t);
+    const installer = path.join(fixture.directory, 'ok-ww-personal-win32-setup.exe');
+    if (kind === 'missing') fs.unlinkSync(installer);
+    if (kind === 'empty') fs.writeFileSync(installer, '');
+    if (kind === 'unexpected') write(fixture.directory, 'private.txt', 'extra');
+    if (kind === 'altered') fs.appendFileSync(installer, 'altered');
+    await assert.rejects(fixture.publish());
     assert.deepEqual(fixture.writes, []);
   });
 }

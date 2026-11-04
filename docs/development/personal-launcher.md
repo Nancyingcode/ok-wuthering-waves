@@ -5,7 +5,7 @@
 | 选项 | 代码来源 |
 | --- | --- |
 | `Official` | 原项目的中国区官方更新仓库 `ok-oldking/ok-ww-update2` |
-| `Personal` | 个人仓库 `Nancyingcode/ok-wuthering-waves` 的版本标签 |
+| `Personal` | 独立运行仓库 `Nancyingcode/ok-ww-personal-update` 的版本标签（部署前须完成文末门禁） |
 
 启动器共享一个应用目录，每次运行当前选中的版本。默认关闭自动启动，采用手动更新，方便先选择版本再运行。两个选项都编译在启动器自身，与工作目录中的 `pyappify.yml` 无关，因此安装官方版本后下载的官方 `pyappify.yml` 也不会覆盖这两个选项。
 
@@ -231,11 +231,11 @@ The packaging job builds the dual-profile launcher with HTTPS, verifies the arti
 
 新标签绑定到**来源构建的 `head_sha`**，不使用发布入口运行时的最新提交。当前构建 `41366113840` 对应 `01e1146a743a9bc31745befae3d6cb27f50f7fe0`；即使入口在之后的提交上运行，发布这批产物的标签仍指向 `01e1146`。
 
-入口要求来源为本仓库成功完成的 `build.yml` 运行，其提交已经合入 `personal`，且恰好存在一个未过期的 `release-assets`。失败、未完成、PR/Fork、未合入的构建或已过期产物都会被拒绝。产物必须包含非空的 `ok-ww-personal-win32-setup.exe` 和 `ok-ww-personal-win32.zip`，旧版 China / Global 包不能被当作双版本包发布。
+入口要求来源为本仓库成功完成的 `build.yml` 运行，其提交已经合入 `personal`，且分别存在一个未过期的 `release-assets` 和同 run 的 `launcher-build-metadata`。失败、未完成、PR/Fork、未合入的构建或已过期产物都会被拒绝。产物必须包含非空的 `ok-ww-personal-win32-setup.exe` 和 `ok-ww-personal-win32.zip`，并通过内嵌 URL、迁移补丁输入摘要、schema 2、固定上游、原始工具与测试收据及文件哈希检查。上面的历史构建示例不满足新 URL/补丁要求，不能用于此次迁移。
 
-已存在的 Release 不会被覆盖；已有标签只有在指向同一个源码提交时才允许复用。入口先建立草稿并上传全部附件，上传成功后才正式发布。若上传失败留下草稿，可检查并删除该草稿后，使用相同版本号和运行 ID 重试；指向同一提交的标签可以保留。
+已有标签只有在指向同一个业务源码提交时才允许复用。两个入口共用“源码草稿及附件 → 运行 commit/tag 及远端字节确认 → Windows 迁移验收 → 公开源码 Release”的顺序。同输入重试会核对草稿身份及已有附件的实际摘要，只补缺失附件；来源或哈希不符时保留现场并拒绝。不要删除匹配草稿或已发布运行 tag 来重试。
 
-入口只使用工作流自带的 `GITHUB_TOKEN` 创建标签和 Release，不需要个人访问令牌。根据 [GitHub 的工作流触发规则](https://docs.github.com/en/actions/how-tos/write-workflows/choose-when-workflows-run/trigger-a-workflow#triggering-a-workflow-from-a-workflow)，该令牌创建的标签不会触发另一次标签构建。入口不安装游戏依赖、不编译、不重新压缩或签名原产物，上传内容保持原始构建字节不变。
+入口使用工作流自带的 `GITHUB_TOKEN` 创建源码标签和 Release；运行仓库发布另需 `PERSONAL_RUNTIME_TOKEN`。根据 [GitHub 的工作流触发规则](https://docs.github.com/en/actions/how-tos/write-workflows/choose-when-workflows-run/trigger-a-workflow#triggering-a-workflow-from-a-workflow)，源码令牌创建的标签不会触发另一次标签构建，补发入口直接调用同一运行发布器完成同步。入口不安装游戏依赖、不编译、不重新压缩或签名原产物，上传内容保持原始构建字节不变。
 
 Use **Publish Existing Build** with a version and a successful Windows Release run ID to publish the original artifacts and checksums without rebuilding. The tag always points to the source run's commit.
 
@@ -259,13 +259,13 @@ Use **Publish Existing Build** with a version and a successful Windows Release r
 3. 选择另一个配置，等待代码及依赖切换成功，再点击「启动」。
 4. 同一来源的历史版本通过启动器的版本选择功能安装或回退。
 
-个人更新源使用 SSH，与开发仓库的 `origin` 一致。运行启动器的用户需要有可访问 GitHub 的 SSH agent，并加载对应密钥；命令行 Git 可读取私钥，并不代表启动器的 SSH agent 已就绪。
+Personal 公开运行下载使用 HTTPS，不要求用户配置开发仓库的 SSH agent。开发仓库的 Git origin 仍使用 SSH。新 URL 需要重建启动器；仅更新 working 目录的 YAML 不会替换旧 EXE 的内嵌 profiles。
 
 Personal 的 Python 依赖使用官方 PyPI，安装及版本更新均保留当前配置的依赖源，避免镜像同步延迟导致已发布的固定版本无法安装。
 
-个人仓库必须在**包含个人修改的提交**上发布版本标签，例如 `v1.0.0`、`v1.0.1`。仅推送 `personal` 分支不会发布启动器可选版本。首次安装 Personal 前需要存在至少一个版本标签。普通代码更新只需发布新标签；启动器配置或补丁改变后需要重新构建启动器。
+源码标签绑定**通过验证的业务提交**，运行仓库以同名标签发布白名单快照，manifest 记录业务 SHA；两个仓库的 commit SHA 不同。仅推送 `personal` 不发布版本。首次公开新启动器前必须已有正式运行 tag，并完成真实目标源冷安装。普通代码变更继续复用兼容的缓存启动器；配置或补丁变化使成品指纹自然失效。
 
-Stop the current application before changing profiles. Personal versions are Git tags on commits containing your changes, rather than branch names. Personal setup requires GitHub SSH-agent access.
+Stop the application before changing profiles. Personal downloads use HTTPS and immutable runtime tags. An older executable needs replacement to migrate its embedded source URL.
 
 ## 验证 / Verification
 
@@ -295,3 +295,72 @@ Get-ChildItem -LiteralPath $targetRoot -Force
 待 PyAppify 上游提供这些行为后，可移除对应补丁并重新构建。项目根目录的官方 `pyappify.yml` 和游戏自动化代码保持原有用途。
 
 The patch keeps launcher profiles authoritative, switches the Git source before setup, and prevents switching while running or starting an incomplete installation.
+
+## Personal 运行分发（P0）
+
+运行仓库必须新建为空仓库，不 fork、不导入开发 refs 或 `.git`。只维护配置的一个分支和显式发布的版本标签。发布器拒绝开发历史、未知分支、非运行 manifest、同名 tag 身份冲突，以及 attributes/filter 改写后的字节差异；不 force push。两个发布 job 共用跨版本串行组，非快进竞争另有最多三次重新读取/重试，分支和 tag 使用 atomic push。
+
+`deploy.personal.txt` 递归保留运行源码、Qt/OCR/MCP 所需资源、`assets/templates`、`echo.onnx` 和翻译，不包含原图、测试、文档、工作流、开发队伍包或本地数据。requirements 直接来自业务 commit，原样保留，通过 pip 提供框架；不会调用 OCR 发布的内联准备逻辑，也不会复制 CI site-packages。当前 validate 中原有 OCR 轮子验证继续执行；这不能替代对原始 requirements 的真实目标源安装验证。
+
+导出与运行发布 dry-run（PowerShell，可直接运行；预览版本号不代表授权正式发布）：
+
+```powershell
+$businessSha = git rev-parse 'personal^{commit}'
+$preview = 'build/personal-runtime-preview-new'
+node scripts/export_personal_runtime.cjs --source-sha $businessSha --version v1.0.4 --policy deploy.personal.txt --output $preview
+node .github/scripts/publish_personal_runtime.cjs --dry-run "$preview/payload"
+node --test tests/test_personal_runtime_export.cjs tests/test_personal_runtime_publish.cjs tests/test_publish_existing_build.cjs tests/test_personal_launcher_cache.cjs tests/test_launcher_workflow.cjs
+```
+
+输出目录必须位于项目 build/ 或系统临时目录下且全新，脚本不清空现有目录。`payload/runtime-manifest.json` 不含机器名和时间；业务文件清单/总字节数/整体 hash 均排除 manifest 自身。外部 `runtime-report.json` 记录 manifest hash、按目录/大文件的体积和 60 MiB 门禁。相同 SHA、版本和策略导出结果相同；脏工作区及 release preparation 不改变结果。Git 传输、Python/wheel 下载、安装占用及纯代码更新网络量独立记录，未测字段为 null，不能以约 42 MB 文件快照宣称整套安装网络收益。
+
+运行发布 dry-run 只校验真实 payload，不假装已生成 EXE 或已验证 launcher metadata；共用 Release 流程的完整无写入 dry-run 由 API/bare-Git fixture 回归覆盖。实际提交后与远端 tag 的 tree/blob 校验也由本地 bare remote 回归覆盖。发布前仍须完成真实 Windows 构建/安装门禁。
+
+部署时在源码仓库配置：
+
+| 位置 | 名称 | 值/范围 |
+| --- | --- | --- |
+| Actions variable | `PERSONAL_RUNTIME_REPOSITORY` | `Nancyingcode/ok-ww-personal-update`，必须与内嵌 URL 一致 |
+| Actions variable | `PERSONAL_RUNTIME_BRANCH` | 例如 `main`；运行仓库唯一发布分支 |
+| Actions secret | `PERSONAL_RUNTIME_TOKEN` | 仅目标运行仓库 Contents 写权限的凭据；可使用平台签发且仍有效的安装 token，不使用源码 `GITHUB_TOKEN` 假设跨仓库权限 |
+| Actions variable | `PERSONAL_RUNTIME_MIGRATION_APPROVAL` | 下述真实冷安装验收 JSON；缺失时运行 tag 可发布，但源码 Release 停在草稿 |
+
+运行仓库需按已批准的访问范围建立，公开客户端 HTTPS 下载必须可读。客户端、manifest、remote URL 和日志中均不保存 token。凭据仅经子进程环境用于 HTTP 授权；临时仓库中的 origin 使用不带凭据的 SSH URL。
+
+首次部署顺序：建立目标空仓库及前三项配置 → 选择已验证业务 SHA 的兼容构建 → 从普通 tag 或 Publish Existing Build 入口建立草稿并发布运行 tag → 下载**该草稿的原始 EXE/ZIP**到独立 Windows 安装目录完成验收 → 配置验收 JSON → 重跑同版本、同构建入口，恢复并公开匹配草稿。缺少任何本地兼容检查时，在外部写入前拒绝；缺少冷安装记录时不公开新启动器。不得为了测试公开正式版本。
+
+验收 JSON 的 `inputs` 从当前启动器 YAML/patch 的 SHA-256 得到，`launcherArtifacts` 原样取同 run 的 `manifest.json.artifacts`（保留两个文件的 name/bytes/sha256），其余身份字段取 `personal-runtime-publication` 回执；`evidenceUrl` 指向保存实际 Windows 验收记录的 GitHub 页面。以下布尔值只有在实际检查通过后才可改为 true，模板本身不能通过门禁：
+
+```json
+{
+  "runtimeRepository": "Nancyingcode/ok-ww-personal-update",
+  "version": "v1.0.4",
+  "runtimeCommit": "填写远端运行 commit",
+  "businessSourceSha": "填写业务 commit",
+  "manifestHash": "填写远端 manifest SHA-256",
+  "payloadHash": "填写 payload SHA-256",
+  "inputs": {
+    "launcher/pyappify-profiles.patch": "填写补丁 SHA-256",
+    "launcher/pyappify.personal.yml": "填写 YAML SHA-256"
+  },
+  "launcherArtifacts": [],
+  "checks": {
+    "coldInstall": false,
+    "pipCheck": false,
+    "imports": false,
+    "gui": false,
+    "templates": false,
+    "ocr": false,
+    "echo": false,
+    "sourceSwitch": false,
+    "userData": false
+  },
+  "evidenceUrl": "https://github.com/填写实际验收记录"
+}
+```
+
+门禁重新读取验收正式 tag 的远端 manifest 与 commit；不接受 prerelease 作为首次迁移基线。后续业务发布可复用这一验收记录，但 YAML、补丁及实际 EXE/ZIP 必须仍匹配。新启动器二进制或迁移输入变化时重新验收。两个仓库没有整体事务：上传失败不发布运行 tag；运行 push 失败保留草稿；公开失败保留运行 tag 及草稿，直接重试。回执和报告独立上传，不扩大 Release 附件白名单。
+
+迁移和回退：先停止应用，更换带新源的启动器，重新选择 Personal 并安装，核对多账号、常用任务及 `configs/custom_teams`。切源前先持久化未就绪状态；fetch、同步或 pip 失败后完成 setup 才允许启动/更新。同步仅复制当前 index 的受管理文件，使用上一来源 index 引导迁移记录，只删除以前发布过而当前已消失的文件；保留未知用户文件、配置、自定义脚本、日志、Python 与 pip 缓存。新源码不再提供的内联框架文件会移除，repo 中未跟踪的旧框架缓存不复制到 working。
+
+旧 `.git` 中的大对象不会自动回收，本轮不执行清空应用目录或磁盘清理。上线前可普通回退本轮代码；上线后不能移动已发布 tag，应选择已验证旧运行版本或发布新的修复版本。需要恢复旧分发机制时重新构建、验证来源正确的启动器，保留用户数据；失败的混合目录不能标记为可启动。

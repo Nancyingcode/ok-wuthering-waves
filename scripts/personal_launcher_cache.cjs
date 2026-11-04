@@ -118,9 +118,9 @@ function artifactRecords(directory) {
     return { name, bytes: stat.size, sha256: hash(fs.readFileSync(filename)) };
   });
 }
-function validateCache(directory, expected) {
+function validateCache(directory, expected, releaseManifest) {
   try {
-    const manifest = readJson(path.join(directory, 'manifest.json'));
+    const manifest = releaseManifest || readJson(path.join(directory, 'manifest.json'));
     if (manifest.schema !== SCHEMA || manifest.fingerprint !== expected.fingerprint) throw new Error('Manifest schema/fingerprint mismatch');
     if (manifest.upstreamCommit !== SETTINGS.commit) throw new Error('Manifest upstream commit mismatch');
     if (serialize(manifest.inputs) !== serialize(expected.inputs)) throw new Error('Manifest inputs mismatch');
@@ -135,7 +135,7 @@ function validateCache(directory, expected) {
     if (!hasMatchingTest) throw new Error('Missing matching launcher test receipt');
     if (!manifest.source?.sha || !manifest.source.repository) throw new Error('Missing launcher build provenance');
     if (serialize(manifest.artifacts) !== serialize(artifactRecords(directory))) throw new Error('Artifact size/hash mismatch');
-    const extra = fs.readdirSync(directory).filter(name => ![...RELEASE_FILES, 'manifest.json'].includes(name));
+    const extra = fs.readdirSync(directory).filter(name => ![...RELEASE_FILES, releaseManifest ? 'SHA256SUMS.txt' : 'manifest.json'].includes(name));
     if (extra.length) throw new Error(`Unexpected cache files: ${extra.join(', ')}`);
     return { valid: true, manifest };
   } catch (error) {
@@ -264,7 +264,7 @@ function main(command, root = path.resolve(__dirname, '..'), argument) {
   }
 }
 module.exports = { SCHEMA, SETTINGS, INPUT_FILES, RELEASE_FILES, fingerprint, fileHashes, validateCache,
-  writeIfChanged, preparation, assertPrepared, receipt, createManifest, clearCache, prepareLock, buildEnvironment, buildIdentity, main };
+  writeIfChanged, preparation, assertPrepared, receipt, createManifest, clearCache, prepareLock, buildEnvironment, buildIdentity, serialize, main };
 if (require.main === module) {
   try { main(process.argv[2], process.argv[3] && path.resolve(process.argv[3]), process.argv[4]); }
   catch (error) { console.error(error.message); process.exitCode = 1; }

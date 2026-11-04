@@ -17,5 +17,5 @@ profiles:
     show_add_defender: true
 
   - name: "Personal"
-    git_url: "git@github.com:Nancyingcode/ok-wuthering-waves.git"
+    git_url: "https://github.com/Nancyingcode/ok-ww-personal-update.git"
     pip_args: "--no-deps --index-url https://pypi.org/simple/"

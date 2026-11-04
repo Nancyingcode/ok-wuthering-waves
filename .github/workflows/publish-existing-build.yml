@@ -27,14 +27,18 @@ jobs:
     if: github.repository == 'Nancyingcode/ok-wuthering-waves'
     runs-on: ubuntu-latest
     timeout-minutes: 10
+    concurrency:
+      group: personal-runtime-publish-${{ github.repository }}
+      cancel-in-progress: false
     steps:
       - name: Check out publishing tools
         uses: actions/checkout@v4
         with:
+          ref: personal
           persist-credentials: false
 
       - name: Test publishing tools
-        run: node --test tests/test_publish_existing_build.cjs
+        run: node --test tests/test_publish_existing_build.cjs tests/test_personal_runtime_export.cjs tests/test_personal_runtime_publish.cjs
 
       - name: Validate source build and version
         id: source
@@ -61,10 +65,28 @@ jobs:
           path: release-assets
           merge-multiple: true
 
+      - name: Download metadata from the same business build
+        uses: actions/download-artifact@v4
+        with:
+          artifact-ids: ${{ fromJSON(steps.source.outputs.result).metadataArtifactId }}
+          github-token: ${{ github.token }}
+          run-id: ${{ fromJSON(steps.source.outputs.result).runId }}
+          path: launcher-metadata
+          merge-multiple: true
+
+      - name: Fetch immutable business source without replacing publishing tools
+        env:
+          BUSINESS_SHA: ${{ fromJSON(steps.source.outputs.result).sha }}
+        run: git fetch --no-tags origin "$BUSINESS_SHA"
+
       - name: Generate checksums and publish existing assets
         uses: actions/github-script@v7
         env:
           SOURCE_METADATA: ${{ steps.source.outputs.result }}
+          PERSONAL_RUNTIME_REPOSITORY: ${{ vars.PERSONAL_RUNTIME_REPOSITORY }}
+          PERSONAL_RUNTIME_BRANCH: ${{ vars.PERSONAL_RUNTIME_BRANCH }}
+          PERSONAL_RUNTIME_TOKEN: ${{ secrets.PERSONAL_RUNTIME_TOKEN }}
+          PERSONAL_RUNTIME_MIGRATION_APPROVAL: ${{ vars.PERSONAL_RUNTIME_MIGRATION_APPROVAL }}
         with:
           github-token: ${{ github.token }}
           script: |
@@ -78,3 +100,15 @@ jobs:
               .addLink(`Source run ${source.runId}`, source.runUrl)
               .addRaw(`\n\nCommit: \`${source.sha}\`\n\nNo rebuild was performed.\n`)
               .write();
+
+      - name: Upload runtime publication evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: personal-runtime-publication
+          path: |
+            build/personal-runtime-*/runtime-report.json
+            build/personal-runtime-*/payload/runtime-manifest.json
+            build/personal-runtime-publication.json
+          if-no-files-found: warn
+          retention-days: 30

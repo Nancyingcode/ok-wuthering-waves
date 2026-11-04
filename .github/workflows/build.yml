@@ -60,7 +60,7 @@ jobs:
           persist-credentials: false
 
       - name: Test build and publishing tools
-        run: node --test tests/test_publish_existing_build.cjs tests/test_personal_launcher_cache.cjs tests/test_launcher_workflow.cjs
+        run: node --test tests/test_publish_existing_build.cjs tests/test_personal_runtime_export.cjs tests/test_personal_runtime_publish.cjs tests/test_personal_launcher_cache.cjs tests/test_launcher_workflow.cjs
 
       - name: Set up Python ${{ env.PYTHON_VERSION }}
         uses: actions/setup-python@v5
@@ -649,15 +649,66 @@ jobs:
            (github.repository != 'ok-oldking/ok-wuthering-waves' && needs.package_personal.result == 'success')) }}
     needs: [validate, synchronize, package, package_personal]
     runs-on: ubuntu-latest
+    concurrency:
+      group: personal-runtime-publish-${{ github.repository }}
+      cancel-in-progress: false
 
     steps:
+      - name: Check out publishing tools and immutable source objects
+        if: github.repository == 'Nancyingcode/ok-wuthering-waves'
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+
       - name: Download release assets
         uses: actions/download-artifact@v4
         with:
           name: release-assets
           path: pyappify_dist
 
+      - name: Download matching launcher metadata
+        if: github.repository == 'Nancyingcode/ok-wuthering-waves'
+        uses: actions/download-artifact@v4
+        with:
+          name: launcher-build-metadata
+          path: launcher-metadata
+
+      - name: Publish Personal runtime and matching launcher release
+        if: github.repository == 'Nancyingcode/ok-wuthering-waves'
+        uses: actions/github-script@v7
+        env:
+          PERSONAL_RUNTIME_REPOSITORY: ${{ vars.PERSONAL_RUNTIME_REPOSITORY }}
+          PERSONAL_RUNTIME_BRANCH: ${{ vars.PERSONAL_RUNTIME_BRANCH }}
+          PERSONAL_RUNTIME_TOKEN: ${{ secrets.PERSONAL_RUNTIME_TOKEN }}
+          PERSONAL_RUNTIME_MIGRATION_APPROVAL: ${{ vars.PERSONAL_RUNTIME_MIGRATION_APPROVAL }}
+        with:
+          script: |
+            const { execFileSync } = require('node:child_process');
+            const { publishRelease } = require('./.github/scripts/publish_existing_build.cjs');
+            const { isPrerelease, validateVersion } = require('./scripts/export_personal_runtime.cjs');
+            const version = validateVersion(context.ref.replace('refs/tags/', ''));
+            const sha = execFileSync('git', ['rev-parse', `${context.ref}^{commit}`], { encoding: 'utf8' }).trim();
+            if (sha !== context.sha) throw new Error('Release tag does not match the validated business SHA');
+            const source = { version, sha, runId: context.runId,
+              runUrl: `${context.serverUrl}/${context.repo.owner}/${context.repo.repo}/actions/runs/${context.runId}`,
+              prerelease: isPrerelease(version) };
+            await publishRelease({ github, context, source, directory: 'pyappify_dist' });
+
+      - name: Upload runtime publication evidence
+        if: always() && github.repository == 'Nancyingcode/ok-wuthering-waves'
+        uses: actions/upload-artifact@v4
+        with:
+          name: personal-runtime-publication
+          path: |
+            build/personal-runtime-*/runtime-report.json
+            build/personal-runtime-*/payload/runtime-manifest.json
+            build/personal-runtime-publication.json
+          if-no-files-found: warn
+          retention-days: 30
+
       - name: Generate and verify SHA-256 checksums
+        if: github.repository == 'ok-oldking/ok-wuthering-waves'
         shell: bash
         run: |
           set -euo pipefail
@@ -672,6 +723,7 @@ jobs:
           cat SHA256SUMS.txt
 
       - name: Create GitHub release
+        if: github.repository == 'ok-oldking/ok-wuthering-waves'
         uses: softprops/action-gh-release@v2
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

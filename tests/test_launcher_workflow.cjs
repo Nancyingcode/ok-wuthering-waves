@@ -5,6 +5,18 @@ const vm = require('node:vm');
 const { test } = require('node:test');
 
 const workflow = fs.readFileSync(path.join(__dirname, '../.github/workflows/build.yml'), 'utf8');
+const promotion = fs.readFileSync(path.join(__dirname, '../.github/workflows/publish-existing-build.yml'), 'utf8');
+test('both Personal publishing entry points share runtime serialization, source binding and recovery implementation', () => {
+  for (const content of [workflow, promotion]) {
+    assert.match(content, /group: personal-runtime-publish-\$\{\{ github.repository \}\}/);
+    assert.match(content, /publishRelease.*require\('\.\/\.github\/scripts\/publish_existing_build.cjs'\)/);
+    assert.match(content, /PERSONAL_RUNTIME_MIGRATION_APPROVAL:/);
+    assert.match(content, /launcher-build-metadata|metadataArtifactId/);
+  }
+  assert.match(promotion, /BUSINESS_SHA:.*fromJSON\(steps.source.outputs.result\).sha/);
+  assert.match(workflow, /\$\{context.ref\}\^\{commit\}/);
+  assert.match(workflow, /name: Create GitHub release\r?\n        if: github.repository == 'ok-oldking\/ok-wuthering-waves'/);
+});
 function job(name) {
   const match = workflow.match(new RegExp(`^  ${name}:\\r?\\n([\\s\\S]*?)(?=^  [a-z_]+:|$(?![\\s\\S]))`, 'm'));
   assert.ok(match, `Job ${name} exists`);
