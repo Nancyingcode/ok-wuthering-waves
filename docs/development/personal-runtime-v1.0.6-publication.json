@@ -1,0 +1,175 @@
+{
+  "schema": 1,
+  "date": "2026-11-04",
+  "verification": {
+    "passed": true,
+    "version": "v1.0.6",
+    "sourceSha": "54f5a88ab1838dde334469686bbb41460e7614f6",
+    "candidateRunId": 41844467555,
+    "publicationRunId": 41851231841,
+    "releaseUrl": "https://github.com/Nancyingcode/ok-wuthering-waves/releases/tag/v1.0.6",
+    "runtimeRepository": "Nancyingcode/ok-ww-personal-update",
+    "runtimeCommit": "f18933106950b87727eaaf9d6cf174a20809cdcd",
+    "runtimeTree": "066016a25408ceb53c20b63d1eba7bcfcc3c004c",
+    "runtimeAuthor": "Nancyingcode",
+    "runtimeAuthorLogin": "Nancyingcode",
+    "runtimeCommitter": "Nancyingcode",
+    "manifestHash": "00c75eca2e8650a40de3ba3c5de2fe256df93d9ccb25a97b93d1c1760575e971",
+    "payloadHash": "5495007524cdcce3f53058bc08a8d4fbabc8c2163135a43df87146f8a27c9d16",
+    "assets": [
+      {
+        "name": "ok-ww-personal-win32-setup.exe",
+        "size": 4019887,
+        "digest": "sha256:9574e0ca8a5276c27ef037cbfb64f945a4662a705b7d1a6a08c09da1ad8a665b",
+        "browser_download_url": "https://github.com/Nancyingcode/ok-wuthering-waves/releases/download/v1.0.6/ok-ww-personal-win32-setup.exe"
+      },
+      {
+        "name": "ok-ww-personal-win32.zip",
+        "size": 5110408,
+        "digest": "sha256:d8f662c451c98b94fe5ff12564d9ae82e935b441ea05804720a7b84fe64b43a5",
+        "browser_download_url": "https://github.com/Nancyingcode/ok-wuthering-waves/releases/download/v1.0.6/ok-ww-personal-win32.zip"
+      },
+      {
+        "name": "SHA256SUMS.txt",
+        "size": 188,
+        "digest": "sha256:88e55b50717b1fabd5909c549f4293bb22f57338feb6e4ae1f5be0e0e247d783",
+        "browser_download_url": "https://github.com/Nancyingcode/ok-wuthering-waves/releases/download/v1.0.6/SHA256SUMS.txt"
+      }
+    ],
+    "verifiedAt": "2026-11-04T14:54:20.2676765Z"
+  },
+  "tag": {
+    "name": "v1.0.6",
+    "sourceSha": "54f5a88ab1838dde334469686bbb41460e7614f6",
+    "evidenceCommit": "02421fa8969716e3dd3739a6f77b606418363bfa"
+  },
+  "fixes": [
+    "Windows system proxy support, byte progress and interrupted installation recovery",
+    "Hidden installer PowerShell with failure handling retained"
+  ],
+  "publicationRun": {
+    "id": 41851231841,
+    "url": "https://github.com/Nancyingcode/ok-wuthering-waves/actions/runs/41851231841",
+    "headSha": "54f5a88ab1838dde334469686bbb41460e7614f6",
+    "conclusion": "success",
+    "startedAt": "2026-11-04T14:48:21Z",
+    "finishedAt": "2026-11-04T14:53:46Z"
+  },
+  "launcher": {
+    "fingerprint": "adde9455e263da3f6a9befd813d06776b48d0ed97a9b4909adb48f9570e36fc6",
+    "originalBuild": {
+      "repository": "Nancyingcode/ok-wuthering-waves",
+      "runId": "41844467555",
+      "runUrl": "https://github.com/Nancyingcode/ok-wuthering-waves/actions/runs/41844467555",
+      "sha": "54f5a88ab1838dde334469686bbb41460e7614f6"
+    },
+    "cache": {
+      "exactHit": true,
+      "forced": false,
+      "reason": "Manifest and both artifacts verified",
+      "reuse": true
+    },
+    "artifactHashes": [
+      {
+        "bytes": 4019887,
+        "name": "ok-ww-personal-win32-setup.exe",
+        "sha256": "9574e0ca8a5276c27ef037cbfb64f945a4662a705b7d1a6a08c09da1ad8a665b"
+      },
+      {
+        "bytes": 5110408,
+        "name": "ok-ww-personal-win32.zip",
+        "sha256": "d8f662c451c98b94fe5ff12564d9ae82e935b441ea05804720a7b84fe64b43a5"
+      }
+    ]
+  },
+  "buildValidationWallSeconds": 275,
+  "jobTimings": [
+    {
+      "name": "3 · Build personal launcher",
+      "conclusion": "success",
+      "seconds": 151
+    },
+    {
+      "name": "1 · Validate (shard 2)",
+      "conclusion": "success",
+      "seconds": 266
+    },
+    {
+      "name": "1 · Validate (shard 1)",
+      "conclusion": "success",
+      "seconds": 206
+    },
+    {
+      "name": "2 · Synchronize repositories",
+      "conclusion": "success",
+      "seconds": 5
+    },
+    {
+      "name": "3 · Build and optionally sign",
+      "conclusion": "skipped",
+      "seconds": -1
+    }
+  ],
+  "pythonValidation": {
+    "passed": true,
+    "modules": 72,
+    "testsRun": 1040,
+    "skipped": 0,
+    "sourceVerification": "raw Git blobs at the release source SHA"
+  },
+  "publicUpdate": {
+    "scope": "actual published v1.0.5 to v1.0.6 update through the exact CI portable EXE",
+    "passed": true,
+    "startedAt": "2026-11-04T14:57:16.5306570Z",
+    "steps": [
+      {
+        "version": "v1.0.5",
+        "app": {
+          "current_profile": "Personal",
+          "current_version": "v1.0.5",
+          "installed": true,
+          "auto_start": false
+        },
+        "response": {
+          "updated": true,
+          "version": "v1.0.5"
+        }
+      },
+      {
+        "version": "v1.0.6",
+        "app": {
+          "current_profile": "Personal",
+          "current_version": "v1.0.6",
+          "installed": true,
+          "auto_start": false
+        },
+        "response": {
+          "updated": true,
+          "version": "v1.0.6"
+        }
+      }
+    ],
+    "harnessCorrection": "The update request intentionally leaves the UI running. Wait for the response file rather than process exit. Rebase the disposable runtime to v1.0.5, then repeat v1.0.6 with persisted cache snapshots.",
+    "guiPid": 15960,
+    "proxyEnvironmentRemoved": true,
+    "pythonUnchanged": true,
+    "pipCacheUnchanged": true,
+    "resourcesUnchanged": true,
+    "userDataUnchanged": true,
+    "head": "f18933106950b87727eaaf9d6cf174a20809cdcd",
+    "app": {
+      "current_profile": "Personal",
+      "current_version": "v1.0.6",
+      "installed": true,
+      "auto_start": false
+    },
+    "finishedAt": "2026-11-04T14:57:26.3275197Z"
+  },
+  "limitations": [
+    "No game, NPU or real private user-data migration test",
+    "Deep paths remain subject to Windows long-path policy",
+    "NSIS disposable uninstall used /UPDATE; bare /S same-version reinstall was not revalidated here",
+    "Native GUI capture timed out; the user manually confirmed the exact CI launcher",
+    "Windows static proxy validated; PAC support was not added"
+  ]
+}
